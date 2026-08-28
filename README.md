@@ -88,8 +88,6 @@ sudoers は設置前に `visudo -cf` で必ず検証する（壊すとログイ�
 
 hooks の追記前に `settings.json` のバックアップを同ディレクトリに作る。
 
-旧 `sleep-toggle-menu` の特権ファイルが残っていれば既定で削除する。
-残したい場合は `--keep-legacy` を付ける。
 
 ## 使い方
 

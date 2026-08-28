@@ -3,7 +3,6 @@
 #
 #   ./install.sh                 すべて導入する
 #   ./install.sh --dry-run       何をするか表示するだけ
-#   ./install.sh --keep-legacy   旧 sleep-toggle-menu の残骸を残す
 #   ./install.sh --uninstall     導入したものを取り除く
 #
 # 特権が要るのは helper と sudoers の設置だけ。パスワードを聞かれる。
@@ -23,17 +22,12 @@ SUDOERS_DEST="/etc/sudoers.d/wakelock"
 OPENCODE_PLUGIN_DIR="$HOME/.config/opencode/plugin"
 CLAUDE_SETTINGS="$HOME/.claude/settings.json"
 
-LEGACY_HELPER="/usr/local/libexec/sleep-toggle-helper"
-LEGACY_SUDOERS="/etc/sudoers.d/sleep-toggle-menu"
-
 DRY_RUN=0
 UNINSTALL=0
-KEEP_LEGACY=0
 for arg in "$@"; do
   case "$arg" in
     --dry-run)     DRY_RUN=1 ;;
     --uninstall)   UNINSTALL=1 ;;
-    --keep-legacy) KEEP_LEGACY=1 ;;
     *) echo "不明なオプション: $arg" >&2; exit 64 ;;
   esac
 done
@@ -117,30 +111,16 @@ else
   rm -f "$TMP_SUDOERS"
 fi
 
-# ---------------------------------------------------------------- 2. 旧環境の掃除
+# ---------------------------------------------------------------- 2. コマンド
 
-step "2. 旧 sleep-toggle-menu の残骸を確認します"
-if [ "$KEEP_LEGACY" = 1 ]; then
-  say "--keep-legacy が指定されたため残します"
-elif [ -e "$LEGACY_HELPER" ] || [ -e "$LEGACY_SUDOERS" ]; then
-  say "アンインストール済みアプリの特権ファイルが残っています。削除します。"
-  run "sudo rm -f '$LEGACY_HELPER' '$LEGACY_SUDOERS'"
-  say "削除: $LEGACY_HELPER"
-  say "削除: $LEGACY_SUDOERS"
-else
-  say "残骸はありません"
-fi
-
-# ---------------------------------------------------------------- 3. コマンド
-
-step "3. wakelock コマンドを配置します"
+step "2. wakelock コマンドを配置します"
 [ -d "$(dirname "$BIN_DEST")" ] || { echo "配置先がありません: $(dirname "$BIN_DEST")" >&2; exit 1; }
 run "ln -sfn '$BIN_SRC' '$BIN_DEST'"
 say "$BIN_DEST -> $BIN_SRC"
 
-# ---------------------------------------------------------------- 4. opencode
+# ---------------------------------------------------------------- 3. opencode
 
-step "4. opencode プラグインを配置します"
+step "3. opencode プラグインを配置します"
 if [ -d "$HOME/.config/opencode" ]; then
   run "mkdir -p '$OPENCODE_PLUGIN_DIR'"
   run "ln -sfn '$PLUGIN_SRC' '$OPENCODE_PLUGIN_DIR/wakelock.js'"
@@ -149,9 +129,9 @@ else
   say "opencode の設定ディレクトリが見つからないため省略します"
 fi
 
-# ---------------------------------------------------------------- 5. Claude Code
+# ---------------------------------------------------------------- 4. Claude Code
 
-step "5. Claude Code の hooks を設定します"
+step "4. Claude Code の hooks を設定します"
 run "mkdir -p '$(dirname "$CLAUDE_SETTINGS")'"
 [ -f "$CLAUDE_SETTINGS" ] || run "echo '{}' > '$CLAUDE_SETTINGS'"
 
@@ -183,9 +163,9 @@ else
   say "hooks をマージしました (バックアップを同ディレクトリに保存しました)"
 fi
 
-# ---------------------------------------------------------------- 6. GUI
+# ---------------------------------------------------------------- 5. GUI
 
-step "6. メニューバーアプリをビルドして配置します"
+step "5. メニューバーアプリをビルドして配置します"
 if command -v swiftc >/dev/null; then
   run "make -C '$ROOT/app' install"
   if [ "$DRY_RUN" = 0 ]; then
@@ -196,9 +176,9 @@ else
   say "swiftc がないため GUI は省略します (CLI のみ導入されました)"
 fi
 
-# ---------------------------------------------------------------- 7. 確認
+# ---------------------------------------------------------------- 6. 確認
 
-step "7. 動作確認"
+step "6. 動作確認"
 [ "$DRY_RUN" = 0 ] && "$BIN_DEST" doctor || true
 
 cat <<'DONE'
