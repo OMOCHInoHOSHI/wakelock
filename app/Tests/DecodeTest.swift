@@ -37,7 +37,20 @@ struct DecodeTest {
                 failed += 1
             }
         }
-        print(failed == 0 ? "\nデコード検証: 全件成功" : "\n失敗 \(failed) 件")
+        // 90 分が「1時間」と誤表示された不具合の再発防止
+        print("\n分ラベルの検証:")
+        let labels: [(Int, String)] = [(30, "30分"), (60, "1時間"), (90, "1時間30分"), (180, "3時間"), (45, "45分")]
+        for (minutes, expected) in labels {
+            let actual = durationLabel(minutes: minutes)
+            if actual == expected {
+                print("  PASS  \(minutes)分 -> \(actual)")
+            } else {
+                print("  FAIL  \(minutes)分 -> \(actual) (期待 \(expected))")
+                failed += 1
+            }
+        }
+
+        print(failed == 0 ? "\n検証: 全件成功" : "\n失敗 \(failed) 件")
         exit(failed == 0 ? 0 : 1)
     }
 }

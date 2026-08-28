@@ -161,8 +161,8 @@ struct MenuView: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 6) {
-                ForEach([30, 90, 180], id: \.self) { minutes in
-                    Button(minutes < 60 ? "\(minutes)分" : "\(minutes / 60)時間") {
+                ForEach([30, 60, 180], id: \.self) { minutes in
+                    Button(durationLabel(minutes: minutes)) {
                         model.enable(minutes: minutes)
                     }
                     .buttonStyle(.bordered)
@@ -189,7 +189,7 @@ struct MenuView: View {
                 Circle()
                     .fill(running ? Color.green : Color.secondary)
                     .frame(width: 6, height: 6)
-                Text(running ? "ガード稼働中" : "ガード停止中")
+                Text(running ? "ガード稼働中" : "待機中")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }

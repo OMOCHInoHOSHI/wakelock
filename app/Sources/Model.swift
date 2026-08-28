@@ -170,6 +170,16 @@ final class WakelockModel: ObservableObject {
 
 // MARK: - 表示ヘルパ
 
+/// 分をボタン用のラベルにする。
+/// 整数除算で端数を落とすと 90 分が「1時間」と誤表示されるため、余りも必ず出す。
+func durationLabel(minutes: Int) -> String {
+    let hours = minutes / 60
+    let mins = minutes % 60
+    if hours == 0 { return "\(mins)分" }
+    if mins == 0 { return "\(hours)時間" }
+    return "\(hours)時間\(mins)分"
+}
+
 func formatDuration(_ seconds: Int) -> String {
     let total = max(0, seconds)
     let hours = total / 3600
