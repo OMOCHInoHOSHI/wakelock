@@ -10,7 +10,7 @@
 set -uo pipefail
 
 STATE_DIR="${WAKELOCK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/wakelock}"
-HELPER="${WAKELOCK_HELPER:-/usr/local/libexec/sleep-toggle-helper}"
+HELPER="${WAKELOCK_HELPER:-/usr/local/libexec/wakelock-helper}"
 # テストから差し替えられるよう外部コマンドは変数経由で呼ぶ
 PMSET="${WAKELOCK_PMSET:-/usr/bin/pmset}"
 # ":-" ではなく "-" を使い、空文字を指定した場合は sudo なしで実行させる (テスト用)
@@ -20,6 +20,7 @@ HOLD_DIR="$STATE_DIR/hold"
 LOCK_DIR="$STATE_DIR/.lock"
 GUARD_PID="$STATE_DIR/guard.pid"
 LOG="$STATE_DIR/log"
+ENABLED_SINCE="$STATE_DIR/enabled_since"
 
 GUARD_INTERVAL="${WAKELOCK_GUARD_INTERVAL:-20}"
 DEFAULT_ON_DURATION="${WAKELOCK_DEFAULT_DURATION:-2h}"
@@ -109,10 +110,23 @@ current_disablesleep() {
     | /usr/bin/awk '$1 == "SleepDisabled" { print $2; found = 1 } END { if (!found) print 0 }'
 }
 
+# 連続稼働時間を GUI に出すための開始時刻。
+# 他者が既に 1 にしていた場合も記録が残るよう、実際に切り替えたかに関わらず整合させる。
+record_enabled_since() {
+  if [ "$1" = 1 ]; then
+    [ -f "$ENABLED_SINCE" ] || now >"$ENABLED_SINCE"
+  else
+    rm -f "$ENABLED_SINCE"
+  fi
+}
+
 apply_disablesleep() {
   local want="$1" cur
   cur="$(current_disablesleep)"
-  [ "$cur" = "$want" ] && return 0
+  if [ "$cur" = "$want" ]; then
+    record_enabled_since "$want"
+    return 0
+  fi
 
   if [ ! -x "$HELPER" ]; then
     log "helper が見つかりません: $HELPER"
@@ -120,6 +134,7 @@ apply_disablesleep() {
   fi
   if $SUDO "$HELPER" "$want" >/dev/null 2>&1; then
     log "SleepDisabled $cur -> $want"
+    record_enabled_since "$want"
     return 0
   fi
   log "helper の実行に失敗しました (want=$want)"
@@ -374,7 +389,69 @@ cmd_off() {
   echo "wakelock: すべて解除しました"
 }
 
+# GUI から読むための機械可読な状態出力
+status_json() {
+  local f pid expiry label sd guard since arms holds t
+  t="$(now)"
+  sd="$(current_disablesleep)"
+  guard="$(cat "$GUARD_PID" 2>/dev/null)"
+  alive "$guard" || guard=""
+  since="$(cat "$ENABLED_SINCE" 2>/dev/null)"
+
+  arms="$(
+    if [ -d "$ARM_DIR" ]; then
+      for f in "$ARM_DIR"/*; do
+        [ -e "$f" ] || continue
+        pid="$(sed -n '1p' "$f")"; expiry="$(sed -n '2p' "$f")"; label="$(sed -n '3p' "$f")"
+        /usr/bin/jq -n \
+          --arg id "$(basename "$f")" --arg pid "${pid:-0}" \
+          --arg expiry "${expiry:-0}" --arg label "${label:-}" --arg now "$t" '
+          {
+            id: $id,
+            pid: ($pid | tonumber),
+            label: $label,
+            expiry: ($expiry | tonumber),
+            remaining: (if ($expiry | tonumber) == 0 then null
+                        else (($expiry | tonumber) - ($now | tonumber)) end)
+          }'
+      done
+    fi | /usr/bin/jq -s '.'
+  )"
+
+  holds="$(
+    if [ -d "$HOLD_DIR" ]; then
+      for f in "$HOLD_DIR"/*; do
+        [ -e "$f" ] || continue
+        pid="$(sed -n '1p' "$f")"; label="$(sed -n '2p' "$f")"
+        /usr/bin/jq -n --arg id "$(basename "$f")" --arg pid "${pid:-0}" --arg label "${label:-}" '
+          { id: $id, pid: ($pid | tonumber), label: $label }'
+      done
+    fi | /usr/bin/jq -s '.'
+  )"
+
+  /usr/bin/jq -n \
+    --arg sd "${sd:-0}" --arg guard "$guard" --arg since "$since" --arg now "$t" \
+    --argjson arms "${arms:-[]}" --argjson holds "${holds:-[]}" '
+    {
+      sleepDisabled: ($sd | tonumber),
+      guard: {
+        running: ($guard != ""),
+        pid: (if $guard == "" then null else ($guard | tonumber) end)
+      },
+      enabledSince: (if $since == "" then null else ($since | tonumber) end),
+      enabledForSeconds: (if $since == "" then null
+                          else (($now | tonumber) - ($since | tonumber)) end),
+      arms: $arms,
+      holds: $holds,
+      now: ($now | tonumber)
+    }'
+}
+
 cmd_status() {
+  if [ "${1:-}" = "--json" ]; then
+    status_json
+    return 0
+  fi
   local f pid expiry label sd guard remain
   sd="$(current_disablesleep)"
   guard="$(cat "$GUARD_PID" 2>/dev/null)"
@@ -542,7 +619,7 @@ main() {
     run)     cmd_run "$@" ;;
     on)      cmd_on "$@" ;;
     off)     cmd_off ;;
-    status)  cmd_status ;;
+    status)  cmd_status "$@" ;;
     doctor)  cmd_doctor ;;
     acquire) cmd_acquire "$@" ;;
     release) cmd_release "$@" ;;

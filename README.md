@@ -53,16 +53,21 @@ wakelock はこの `disablesleep` を、CLI エージェントの作業状態に
 
 `wakelock run` の途中でターミナルを強制終了しても、ガードが検知して解除する。
 
-## 前提
+## 特権の扱い
 
-`pmset` の実行に sudo が要るため、パスワードなしで叩ける helper を経由する。
+`pmset -a disablesleep` の実行には root が要る。パスワード入力なしで動かすため、
+引数を `0` と `1` だけに限定した最小の helper を経由する。
 
 ```
-/etc/sudoers.d/sleep-toggle-menu:
-  (root) NOPASSWD: /usr/local/libexec/sleep-toggle-helper 0, /usr/local/libexec/sleep-toggle-helper 1
+/usr/local/libexec/wakelock-helper          root:wheel 0755
+/etc/sudoers.d/wakelock                     root:wheel 0440
+  <user> ALL=(root) NOPASSWD: /usr/local/libexec/wakelock-helper 0, /usr/local/libexec/wakelock-helper 1
 ```
 
-helper は `pmset -a disablesleep 0|1` を実行して反映を検証するだけのスクリプト。
+root 権限で動くコードはこの helper だけで、`pmset` 以外は何もしない。
+引数は sudoers 側と helper 側の 二段で検証している。
+sudoers は設置前に `visudo -cf` で必ず検証する（壊すとログインできなくなるため）。
+
 `wakelock doctor` で前提条件をまとめて確認できる。
 
 ## インストール
@@ -75,11 +80,16 @@ helper は `pmset -a disablesleep 0|1` を実行して反映を検証するだ�
 
 導入されるもの:
 
-1. `/opt/homebrew/bin/wakelock` へのシンボリックリンク
-2. `~/.config/opencode/plugin/wakelock.js` へのシンボリックリンク
-3. `~/.claude/settings.json` への hooks 追記（既存設定は保持。再実行しても重複しない）
+1. `/usr/local/libexec/wakelock-helper` と `/etc/sudoers.d/wakelock`（要パスワード）
+2. `/opt/homebrew/bin/wakelock` へのシンボリックリンク
+3. `~/.config/opencode/plugin/wakelock.js` へのシンボリックリンク
+4. `~/.claude/settings.json` への hooks 追記（既存設定は保持。再実行しても重複しない）
+5. `/Applications/Wakelock.app`（メニューバーアプリ）
 
 hooks の追記前に `settings.json` のバックアップを同ディレクトリに作る。
+
+旧 `sleep-toggle-menu` の特権ファイルが残っていれば既定で削除する。
+残したい場合は `--keep-legacy` を付ける。
 
 ## 使い方
 
@@ -100,6 +110,40 @@ wakelock doctor                  # 前提条件の確認
 
 期間の書式は `90m` / `2h` / `45s` / `30`（数値のみは分）。
 `wakelock on` に期間を渡さない場合は 2 時間で自動失効する。
+
+## GUI（メニューバーアプリ）
+
+状態の確認と操作の両方ができる常駐アプリ。Xcode は不要で、
+Command Line Tools の `swiftc` だけでビルドできる。
+
+```sh
+cd app
+make            # ビルド
+make run        # ビルドして起動
+make install    # /Applications へ配置
+make test       # JSON デコードの検証
+```
+
+メニューバーのアイコンが 3 状態を表す。
+
+| アイコン | 意味 |
+|---|---|
+| `bolt.fill` | 蓋を閉じても動作中（`SleepDisabled=1`） |
+| `bolt` | arm 済みだが待機中（承認待ちなど。通常のスリープ設定） |
+| `zzz` | 通常のスリープ設定 |
+
+クリックすると開くパネルでできること:
+
+* arm / hold の一覧と、arm の残り時間
+* 30分 / 90分 / 3時間 の手動有効化
+* 今すぐ解除
+* ガードの稼働状態
+* 30 分以上連続で有効なときの排熱警告
+
+アプリは CLI のロジックを持たない。3 秒ごとに `wakelock status --json` を読み、
+操作は `wakelock on` / `wakelock off` を呼ぶだけ。判断の出所は CLI 側に一本化してある。
+
+`Info.plist` に `LSUIElement=1` を入れてあるので Dock には出ない。
 
 ## アダプタ
 
@@ -128,11 +172,15 @@ opencode 側は `permission.replied` イベントがあるため、ツール呼�
 ## テスト
 
 ```sh
-./test/smoke.sh
+./test/smoke.sh      # CLI の状態遷移（14 項目）
+make -C app test     # GUI の JSON デコード（3 パターン）
 ```
 
-`pmset` と sudo helper をスタブに差し替え、実際のスリープ設定を変えずに
-状態遷移を検証する。14 項目。
+`test/smoke.sh` は `pmset` と sudo helper をスタブに差し替え、
+実際のスリープ設定を変えずに状態遷移を検証する。
+承認待ちで解除されること、承認後に復帰すること、
+コマンドの正常終了・異常終了の両方で解除されること、
+期限切れをガードが失効させることを確認している。
 
 ## 注意
 

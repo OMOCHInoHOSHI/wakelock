@@ -1,0 +1,3 @@
+# wakelock が pmset を叩くための最小権限
+# 引数は 0 と 1 のみ許可し、helper 側でも再検証している
+__USER__ ALL=(root) NOPASSWD: /usr/local/libexec/wakelock-helper 0, /usr/local/libexec/wakelock-helper 1

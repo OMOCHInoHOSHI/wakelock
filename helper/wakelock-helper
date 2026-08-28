@@ -1,0 +1,31 @@
+#!/bin/zsh
+#
+# wakelock-helper - pmset の disablesleep だけを root 権限で切り替える
+#
+# sudoers から NOPASSWD で呼ばれる唯一の特権コードなので、
+# 受け付ける引数を "0" と "1" のみに厳格に限定する。
+#
+# 設置先: /usr/local/libexec/wakelock-helper (root:wheel 0755)
+
+set -euo pipefail
+
+if [[ "$#" -ne 1 ]] || [[ "$1" != "0" && "$1" != "1" ]]; then
+  print -u2 "usage: wakelock-helper 0|1"
+  exit 64
+fi
+
+desired="$1"
+
+/usr/bin/pmset -a disablesleep "${desired}"
+
+# pmset -g は SleepDisabled が 0 のとき行自体を出力しないことがある。
+# 空文字を 0 とみなさないと、解除時に必ず検証失敗になる。
+actual="$(/usr/bin/pmset -g | /usr/bin/awk '$1 == "SleepDisabled" { print $2; exit }')"
+[[ -z "${actual}" ]] && actual=0
+
+if [[ "${actual}" != "${desired}" ]]; then
+  print -u2 "SleepDisabled が ${desired} になりませんでした (現在: ${actual})"
+  exit 1
+fi
+
+print "${actual}"
