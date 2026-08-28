@@ -147,7 +147,7 @@ struct MenuView: View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
-            Text("長時間スリープを無効にしています。カバンに入れたままだと排熱できません。")
+            Text(model.thermalWarningText)
                 .font(.caption)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -189,6 +189,16 @@ struct MenuView: View {
                 }
                 Spacer()
             }
+
+            // 自動失効しない選択肢なので、色を変えて他と区別する
+            Button {
+                model.enableForever()
+            } label: {
+                Label("無期限", systemImage: "infinity")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .tint(.orange)
 
             Button {
                 model.disable()

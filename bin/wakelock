@@ -364,8 +364,18 @@ cmd_on() {
     esac
   done
   [ -n "$duration" ] || duration="$DEFAULT_ON_DURATION"
-  secs="$(parse_duration "$duration")" || die "期間の書式が不正です: $duration (例: 90m, 2h)"
-  expiry=$(( $(now) + secs ))
+
+  case "$duration" in
+    0|inf|infinite|forever)
+      # 無期限。PID にも紐付かないため、解除は明示的な操作だけになる。
+      expiry=0
+      ;;
+    *)
+      secs="$(parse_duration "$duration")" \
+        || die "期間の書式が不正です: $duration (例: 90m, 2h, 無期限は 0)"
+      expiry=$(( $(now) + secs ))
+      ;;
+  esac
 
   lock
   # PID 0 は「プロセスに紐付かない手動 arm」を意味し、期限だけで失効する
@@ -379,7 +389,12 @@ cmd_on() {
   reconcile
   unlock
 
-  printf 'wakelock: %s まで有効化しました (%s モード)\n' "$(date -r "$expiry" '+%H:%M')" "$mode"
+  if [ "$expiry" = 0 ]; then
+    printf 'wakelock: 無期限で有効化しました (%s モード)\n' "$mode"
+    printf '  自動では解除されません。wakelock off かメニューバーから解除してください\n'
+  else
+    printf 'wakelock: %s まで有効化しました (%s モード)\n' "$(date -r "$expiry" '+%H:%M')" "$mode"
+  fi
 }
 
 cmd_off() {
@@ -652,13 +667,14 @@ wakelock - Mac の蓋を閉じたまま CLI エージェントを走らせる
       それ以外のコマンドは --always が既定で、実行中はずっと無効化する。
 
   wakelock on [--hooked] [<期間>]
-      実行中のセッションに後から有効化する。既定は 2h で自動失効する。
+      CLI と無関係に手動で有効化する。既定は 2h で自動失効する。
+      期間に 0 を渡すと無期限になる（自動では解除されない）。
 
   wakelock off       すべて解除する
   wakelock status    現在の状態を表示する
   wakelock doctor    前提条件を確認する
 
-期間の書式: 90m / 2h / 45s / 30 (数値のみは分)
+期間の書式: 90m / 2h / 45s / 30 (数値のみは分) / 0 (無期限)
 
 例:
   wakelock auto on                         一度だけ実行すればあとは自動

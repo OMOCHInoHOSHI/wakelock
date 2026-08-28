@@ -87,6 +87,11 @@ enum WakelockCLI {
         run(["on", "\(minutes)m"])
     }
 
+    /// 期限なしで有効化する。自動失効もプロセス束縛もないので解除は明示操作のみ。
+    static func enableForever() {
+        run(["on", "0"])
+    }
+
     static func disable() {
         run(["off"])
     }
@@ -148,6 +153,10 @@ final class WakelockModel: ObservableObject {
         perform { WakelockCLI.enable(minutes: minutes) }
     }
 
+    func enableForever() {
+        perform { WakelockCLI.enableForever() }
+    }
+
     func disable() {
         perform { WakelockCLI.disable() }
     }
@@ -175,9 +184,23 @@ final class WakelockModel: ObservableObject {
         return "通常のスリープ設定"
     }
 
+    /// 手動で張られた無期限の arm。PID にも期限にも紐付かないため自動では消えない。
+    var hasIndefiniteManualArm: Bool {
+        status?.arms.contains { $0.pid == 0 && $0.expiry == 0 } ?? false
+    }
+
     var shouldWarnThermal: Bool {
-        guard let seconds = status?.enabledForSeconds else { return false }
+        guard let status, status.isLidCloseActive else { return false }
+        // 無期限は自動解除が効かないので、経過時間によらず注意を出し続ける
+        if hasIndefiniteManualArm { return true }
+        guard let seconds = status.enabledForSeconds else { return false }
         return seconds >= Self.thermalWarningThreshold
+    }
+
+    var thermalWarningText: String {
+        hasIndefiniteManualArm
+            ? "無期限で有効化しています。自動では解除されません。カバンに入れたままだと排熱できません。"
+            : "長時間スリープを無効にしています。カバンに入れたままだと排熱できません。"
     }
 }
 

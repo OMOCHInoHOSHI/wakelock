@@ -159,5 +159,39 @@ else
 fi
 
 echo
+echo "12. 手動の無期限は期限で失効しない"
+"$WL" off >/dev/null 2>&1
+"$WL" auto off >/dev/null 2>&1
+echo 0 >"$SLEEP_STATE"
+"$WL" on 0 >/dev/null 2>&1
+check 1 "無期限で有効化される"
+expiry="$("$WL" status --json | jq -r '.arms[0].expiry')"
+remaining="$("$WL" status --json | jq -r '.arms[0].remaining')"
+if [ "$expiry" = "0" ] && [ "$remaining" = "null" ]; then
+  printf '  \033[32mPASS\033[0m  expiry=0 / remaining=null (無期限)\n'; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  expiry=%s remaining=%s\n' "$expiry" "$remaining"; FAIL=$((FAIL + 1))
+fi
+sleep 3
+check 1 "時間が経っても失効しない"
+
+echo
+echo "13. 解除しても自動モードなら次の作業で arm が復活する"
+"$WL" auto on >/dev/null 2>&1
+"$WL" acquire revive-test --pid $$ --label claude >/dev/null 2>&1
+check 1 "自動 arm で有効化"
+"$WL" off >/dev/null 2>&1
+check 0 "解除された"
+if [ -z "$(ls "$WAKELOCK_STATE_DIR/arm" 2>/dev/null)" ]; then
+  printf '  \033[32mPASS\033[0m  arm が消えている\n'; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  arm が残っている\n'; FAIL=$((FAIL + 1))
+fi
+"$WL" acquire revive-test --pid $$ --label claude >/dev/null 2>&1
+check 1 "次の acquire で自動的に復活する"
+"$WL" auto off >/dev/null 2>&1
+"$WL" off >/dev/null 2>&1
+
+echo
 printf '結果: \033[32m%d PASS\033[0m / \033[31m%d FAIL\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
