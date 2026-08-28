@@ -38,6 +38,11 @@ struct WakelockStatus: Decodable {
     var isLidCloseActive: Bool { sleepDisabled == 1 }
     var isArmed: Bool { !arms.isEmpty }
     var isWorking: Bool { !holds.isEmpty }
+
+    /// 実際にエージェントが作業している hold だけを返す。
+    /// pid 0 は手動で有効化した印であって作業ではないので、「作業中」には数えない。
+    /// 手動分は arm 側に「手動で有効化 / 無期限」として出るため、情報は失われない。
+    var agentHolds: [Hold] { holds.filter { $0.pid > 0 } }
 }
 
 // MARK: - CLI 呼び出し

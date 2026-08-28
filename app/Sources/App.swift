@@ -96,15 +96,15 @@ struct MenuView: View {
 
                     section(
                         title: "作業中",
-                        rows: status.holds.map { hold in
+                        rows: status.agentHolds.map { hold in
                             Row(
                                 id: hold.id,
                                 primary: displayLabel(hold.label),
                                 // セッション ID は UUID で読めないので、代わりにプロセスを示す
-                                secondary: hold.pid > 0 ? "pid \(hold.pid)" : "プロセス非依存"
+                                secondary: "pid \(hold.pid)"
                             )
                         },
-                        emptyText: "承認待ち / 待機中"
+                        emptyText: "作業中のエージェントはありません"
                     )
                 }
             }

@@ -50,6 +50,28 @@ struct DecodeTest {
             }
         }
 
+        // 手動で有効化した hold (pid 0) を「作業中」に数えない
+        print("\n作業中の抽出:")
+        let mixed = #"""
+        {"auto":true,"sleepDisabled":1,"guard":{"running":true,"pid":1},"enabledSince":1,
+         "enabledForSeconds":10,
+         "arms":[{"id":"manual","pid":0,"label":"manual","expiry":0,"remaining":null}],
+         "holds":[{"id":"sess","pid":3957,"label":"claude"},
+                  {"id":"manual","pid":0,"label":"manual"}],"now":11}
+        """#
+        if let s = try? JSONDecoder().decode(WakelockStatus.self, from: Data(mixed.utf8)) {
+            if s.holds.count == 2 && s.agentHolds.count == 1 && s.agentHolds.first?.label == "claude" {
+                print("  PASS  hold 2 件のうち手動 1 件を除外し claude だけを作業中とする")
+                print("  PASS  除外しても hasIndefiniteManualArm は維持: \(s.arms.contains { $0.pid == 0 && $0.expiry == 0 })")
+            } else {
+                print("  FAIL  holds=\(s.holds.count) agentHolds=\(s.agentHolds.count)")
+                failed += 1
+            }
+        } else {
+            print("  FAIL  デコードできない")
+            failed += 1
+        }
+
         print("\n表示ラベルの検証:")
         let labelCases: [(String, String)] = [
             ("manual", "手動で有効化"), ("hook", "エージェント"),
