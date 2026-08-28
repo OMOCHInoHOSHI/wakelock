@@ -39,7 +39,7 @@ struct DecodeTest {
         }
         // 90 分が「1時間」と誤表示された不具合の再発防止
         print("\n分ラベルの検証:")
-        let labels: [(Int, String)] = [(30, "30分"), (60, "1時間"), (90, "1時間30分"), (180, "3時間"), (45, "45分")]
+        let labels: [(Int, String)] = [(30, "30分"), (60, "1時間"), (90, "1時間30分"), (180, "3時間"), (480, "8時間"), (45, "45分")]
         for (minutes, expected) in labels {
             let actual = durationLabel(minutes: minutes)
             if actual == expected {
@@ -69,6 +69,42 @@ struct DecodeTest {
             }
         } else {
             print("  FAIL  デコードできない")
+            failed += 1
+        }
+
+        // メニューバーで見分けが付くよう、3 状態はすべて別の記号にする
+        print("\nアイコンの検証:")
+        func status(sleepDisabled: Int, armed: Bool) -> WakelockStatus? {
+            let arms = armed
+                ? #"[{"id":"a","pid":0,"label":"manual","expiry":0,"remaining":null}]"#
+                : "[]"
+            let json = """
+            {"auto":false,"sleepDisabled":\(sleepDisabled),"guard":{"running":true,"pid":1},
+             "enabledSince":null,"enabledForSeconds":null,
+             "arms":\(arms),"holds":[],"now":1}
+            """
+            return try? JSONDecoder().decode(WakelockStatus.self, from: Data(json.utf8))
+        }
+        let iconCases: [(Int, Bool, String, String)] = [
+            (1, true,  "bolt.fill",  "蓋を閉じても動く"),
+            (0, true,  "bolt.slash", "運用中だが今は寝る"),
+            (0, false, "moon.zzz",   "通常のスリープ設定"),
+        ]
+        var seen = Set<String>()
+        for (sd, armed, expected, desc) in iconCases {
+            let actual = status(sleepDisabled: sd, armed: armed)?.iconName ?? "nil"
+            seen.insert(actual)
+            if actual == expected {
+                print("  PASS  \(desc) -> \(actual)")
+            } else {
+                print("  FAIL  \(desc) -> \(actual) (期待 \(expected))")
+                failed += 1
+            }
+        }
+        if seen.count == iconCases.count {
+            print("  PASS  3 状態がすべて別の記号になっている")
+        } else {
+            print("  FAIL  記号が重複している: \(seen)")
             failed += 1
         }
 

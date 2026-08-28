@@ -43,6 +43,16 @@ struct WakelockStatus: Decodable {
     /// pid 0 は手動で有効化した印であって作業ではないので、「作業中」には数えない。
     /// 手動分は arm 側に「手動で有効化 / 無期限」として出るため、情報は失われない。
     var agentHolds: [Hold] { holds.filter { $0.pid > 0 } }
+
+    /// メニューバーのアイコン。
+    /// 「今この瞬間、蓋を閉じて平気か」が一目で分かることを最優先にする。
+    /// bolt.fill と bolt は 16pt だと見分けが付かなかったため、塗りの違いではなく
+    /// 形の違う記号を使う。
+    var iconName: String {
+        if isLidCloseActive { return "bolt.fill" }   // 閉じても動く
+        if isArmed { return "bolt.slash" }           // 運用中だが今は寝る
+        return "moon.zzz"                            // 通常のスリープ設定
+    }
 }
 
 // MARK: - CLI 呼び出し
@@ -174,12 +184,7 @@ final class WakelockModel: ObservableObject {
 
     // MARK: 表示用の導出値
 
-    var iconName: String {
-        guard let status else { return "questionmark" }
-        if status.isLidCloseActive { return "bolt.fill" }       // 蓋を閉じても動く
-        if status.isArmed { return "bolt" }                     // 待機中 (承認待ちなど)
-        return "zzz"                                            // 通常のスリープ設定
-    }
+    var iconName: String { status?.iconName ?? "questionmark" }
 
     var headline: String {
         guard let status else { return "状態を取得できません" }

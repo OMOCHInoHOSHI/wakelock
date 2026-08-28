@@ -182,7 +182,7 @@ struct MenuView: View {
                 .foregroundStyle(.secondary)
 
             HStack(spacing: 6) {
-                ForEach([30, 60, 180], id: \.self) { minutes in
+                ForEach([30, 60, 180, 480], id: \.self) { minutes in
                     Button(durationLabel(minutes: minutes)) {
                         model.enable(minutes: minutes)
                     }
