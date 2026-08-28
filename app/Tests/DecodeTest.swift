@@ -74,25 +74,26 @@ struct DecodeTest {
 
         // メニューバーで見分けが付くよう、3 状態はすべて別の記号にする
         print("\nアイコンの検証:")
-        func status(sleepDisabled: Int, armed: Bool) -> WakelockStatus? {
+        func status(sleepDisabled: Int, armed: Bool, auto: Bool = false) -> WakelockStatus? {
             let arms = armed
                 ? #"[{"id":"a","pid":0,"label":"manual","expiry":0,"remaining":null}]"#
                 : "[]"
             let json = """
-            {"auto":false,"sleepDisabled":\(sleepDisabled),"guard":{"running":true,"pid":1},
+            {"auto":\(auto),"sleepDisabled":\(sleepDisabled),"guard":{"running":true,"pid":1},
              "enabledSince":null,"enabledForSeconds":null,
              "arms":\(arms),"holds":[],"now":1}
             """
             return try? JSONDecoder().decode(WakelockStatus.self, from: Data(json.utf8))
         }
-        let iconCases: [(Int, Bool, String, String)] = [
-            (1, true,  "bolt.fill",  "蓋を閉じても動く"),
-            (0, true,  "bolt.slash", "運用中だが今は寝る"),
-            (0, false, "moon.zzz",   "通常のスリープ設定"),
+        let iconCases: [(Int, Bool, Bool, String, String)] = [
+            (1, true,  false, "bolt.fill",  "蓋を閉じても動く"),
+            (0, true,  false, "bolt.slash", "arm あり・作業なし"),
+            (0, false, true,  "bolt.slash", "自動モードで待機中（arm 前）"),
+            (0, false, false, "moon.zzz",   "通常のスリープ設定"),
         ]
         var seen = Set<String>()
-        for (sd, armed, expected, desc) in iconCases {
-            let actual = status(sleepDisabled: sd, armed: armed)?.iconName ?? "nil"
+        for (sd, armed, auto, expected, desc) in iconCases {
+            let actual = status(sleepDisabled: sd, armed: armed, auto: auto)?.iconName ?? "nil"
             seen.insert(actual)
             if actual == expected {
                 print("  PASS  \(desc) -> \(actual)")
@@ -101,10 +102,10 @@ struct DecodeTest {
                 failed += 1
             }
         }
-        if seen.count == iconCases.count {
-            print("  PASS  3 状態がすべて別の記号になっている")
+        if seen.count == 3 {
+            print("  PASS  3 種類の記号がすべて使い分けられている")
         } else {
-            print("  FAIL  記号が重複している: \(seen)")
+            print("  FAIL  記号の種類が 3 つでない: \(seen)")
             failed += 1
         }
 

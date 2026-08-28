@@ -48,10 +48,14 @@ struct WakelockStatus: Decodable {
     /// 「今この瞬間、蓋を閉じて平気か」が一目で分かることを最優先にする。
     /// bolt.fill と bolt は 16pt だと見分けが付かなかったため、塗りの違いではなく
     /// 形の違う記号を使う。
+    ///
+    /// 自動モードも「運用中」に数える。arm が立つのはエージェントが最初に
+    /// 作業を始めた後なので、それだけを見ると「自動モードで待機している」状態が
+    /// 通常時と区別できなくなるため。
     var iconName: String {
-        if isLidCloseActive { return "bolt.fill" }   // 閉じても動く
-        if isArmed { return "bolt.slash" }           // 運用中だが今は寝る
-        return "moon.zzz"                            // 通常のスリープ設定
+        if isLidCloseActive { return "bolt.fill" }      // 閉じても動く
+        if isArmed || auto { return "bolt.slash" }      // 運用中だが今は寝る
+        return "moon.zzz"                               // 通常のスリープ設定
     }
 }
 
