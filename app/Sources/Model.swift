@@ -206,6 +206,17 @@ final class WakelockModel: ObservableObject {
 
 // MARK: - 表示ヘルパ
 
+/// 状態ファイルのラベルを表示用の日本語にする。
+/// ファイル側は機械可読なまま（他ツールから読めるように）、変換は表示側だけで行う。
+func displayLabel(_ raw: String) -> String {
+    switch raw {
+    case "manual": return "手動で有効化"
+    case "hook":   return "エージェント"
+    case "":       return "不明"
+    default:       return raw   // claude / opencode などはそのまま出す
+    }
+}
+
 /// 分をボタン用のラベルにする。
 /// 整数除算で端数を落とすと 90 分が「1時間」と誤表示されるため、余りも必ず出す。
 func durationLabel(minutes: Int) -> String {

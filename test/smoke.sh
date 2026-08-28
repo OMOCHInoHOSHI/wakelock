@@ -15,6 +15,8 @@ echo 0 >"$SLEEP_STATE"
 # その挙動まで含めて再現する。
 cat >"$WORK/pmset" <<PMSET_EOF
 #!/usr/bin/env bash
+# broken フラグがあると何も出力しない (pmset の読み取り失敗を再現する)
+[ -f "$WORK/pmset_broken" ] && exit 0
 if [ "\${1:-}" = "-g" ]; then
   echo " sleep                1"
   [ "\$(cat "$SLEEP_STATE")" = "1" ] && echo " SleepDisabled        1"
@@ -50,6 +52,15 @@ check() {
     printf '  \033[31mFAIL\033[0m  %s (期待 %s / 実際 %s)\n' "$desc" "$want" "$got"
     FAIL=$((FAIL + 1))
   fi
+}
+
+# 固定の sleep はガードの起動タイミング次第で揺れるため、条件が満たされるまで待つ
+wait_for() {
+  local want="$1" limit="${2:-10}" i=0
+  while [ "$(cat "$SLEEP_STATE")" != "$want" ] && [ "$i" -lt $((limit * 10)) ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
 }
 
 check_holds() {
@@ -118,10 +129,12 @@ check 0 "異常終了でも解除される"
 
 echo
 echo "9. 期限切れの arm はガードが失効させる"
-"$WL" on --hooked 1s >/dev/null 2>&1
+# 期限は acquire が終わるまで確実に生きている長さにする。
+# 1s だとプロセス起動と祖先 PID 走査の間に切れてテストが揺れる。
+"$WL" on --hooked 5s >/dev/null 2>&1
 "$WL" acquire session-y --label test >/dev/null 2>&1
 check 1 "有効化された"
-sleep 3
+wait_for 0 15
 check 0 "期限切れで自動解除される"
 
 echo
@@ -190,6 +203,28 @@ fi
 "$WL" acquire revive-test --pid $$ --label claude >/dev/null 2>&1
 check 1 "次の acquire で自動的に復活する"
 "$WL" auto off >/dev/null 2>&1
+"$WL" off >/dev/null 2>&1
+
+echo
+echo "14. pmset が読めなくても適用は行われ、偽の状態遷移をログに残さない"
+"$WL" off >/dev/null 2>&1
+echo 0 >"$SLEEP_STATE"
+# この節で書かれた行だけを見たいのでログを空にする
+: >"$WAKELOCK_STATE_DIR/log"
+: >"$WORK/pmset_broken"
+"$WL" on 30m >/dev/null 2>&1
+check 1 "読み取り失敗でも有効化される"
+if grep -q "適用前の値は読み取れず" "$WAKELOCK_STATE_DIR/log" 2>/dev/null; then
+  printf '  \033[32mPASS\033[0m  読み取り失敗として記録される\n'; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  読み取り失敗が記録されていない\n'; FAIL=$((FAIL + 1))
+fi
+if grep -q "SleepDisabled 0 -> 1" "$WAKELOCK_STATE_DIR/log" 2>/dev/null; then
+  printf '  \033[31mFAIL\033[0m  偽の状態遷移が記録されている\n'; FAIL=$((FAIL + 1))
+else
+  printf '  \033[32mPASS\033[0m  偽の状態遷移は記録されない\n'; PASS=$((PASS + 1))
+fi
+rm -f "$WORK/pmset_broken"
 "$WL" off >/dev/null 2>&1
 
 echo

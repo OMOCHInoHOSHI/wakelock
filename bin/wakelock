@@ -105,9 +105,17 @@ unlock() {
 # ---------------------------------------------------------------- pmset 制御
 
 # SleepDisabled は 0 のとき pmset -g に現れないことがあるため、
-# 見つからなければ 0 とみなす。
+# 行が無ければ 0 とみなす。
+# ただし pmset 自体が何も返さなかった場合は「行が無い」のではなく「読めなかった」ので、
+# 0 と混同しないよう unknown を返す。混同すると誤った状態遷移をログに残してしまう。
 current_disablesleep() {
-  "$PMSET" -g 2>/dev/null \
+  local out
+  out="$("$PMSET" -g 2>/dev/null)"
+  if [ -z "$out" ]; then
+    echo unknown
+    return 0
+  fi
+  printf '%s\n' "$out" \
     | /usr/bin/awk '$1 == "SleepDisabled" { print $2; found = 1 } END { if (!found) print 0 }'
 }
 
@@ -134,7 +142,11 @@ apply_disablesleep() {
     return 1
   fi
   if $SUDO "$HELPER" "$want" >/dev/null 2>&1; then
-    log "SleepDisabled $cur -> $want"
+    if [ "$cur" = unknown ]; then
+      log "SleepDisabled を $want に設定しました (適用前の値は読み取れず)"
+    else
+      log "SleepDisabled $cur -> $want"
+    fi
     record_enabled_since "$want"
     return 0
   fi
@@ -410,6 +422,7 @@ status_json() {
   local f pid expiry label sd guard since arms holds t
   t="$(now)"
   sd="$(current_disablesleep)"
+  [ "$sd" = unknown ] && sd=0
   guard="$(cat "$GUARD_PID" 2>/dev/null)"
   alive "$guard" || guard=""
   since="$(cat "$ENABLED_SINCE" 2>/dev/null)"
@@ -475,6 +488,7 @@ cmd_status() {
   fi
   local f pid expiry label sd guard remain
   sd="$(current_disablesleep)"
+  [ "$sd" = unknown ] && sd="不明"
   guard="$(cat "$GUARD_PID" 2>/dev/null)"
 
   printf '自動モード    : %s\n' "$([ -f "$AUTO_FLAG" ] && echo '有効' || echo '無効')"

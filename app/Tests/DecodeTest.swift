@@ -50,6 +50,21 @@ struct DecodeTest {
             }
         }
 
+        print("\n表示ラベルの検証:")
+        let labelCases: [(String, String)] = [
+            ("manual", "手動で有効化"), ("hook", "エージェント"),
+            ("claude", "claude"), ("opencode", "opencode"), ("", "不明"),
+        ]
+        for (raw, expected) in labelCases {
+            let actual = displayLabel(raw)
+            if actual == expected {
+                print("  PASS  \"\(raw)\" -> \(actual)")
+            } else {
+                print("  FAIL  \"\(raw)\" -> \(actual) (期待 \(expected))")
+                failed += 1
+            }
+        }
+
         print(failed == 0 ? "\n検証: 全件成功" : "\n失敗 \(failed) 件")
         exit(failed == 0 ? 0 : 1)
     }

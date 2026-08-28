@@ -88,7 +88,7 @@ struct MenuView: View {
                         rows: status.arms.map { arm in
                             Row(
                                 id: arm.id,
-                                primary: arm.label.isEmpty ? arm.id : arm.label,
+                                primary: displayLabel(arm.label),
                                 secondary: arm.remaining.map { "残り \(formatDuration($0))" } ?? "無期限"
                             )
                         }
@@ -99,8 +99,9 @@ struct MenuView: View {
                         rows: status.holds.map { hold in
                             Row(
                                 id: hold.id,
-                                primary: hold.label.isEmpty ? hold.id : hold.label,
-                                secondary: hold.id
+                                primary: displayLabel(hold.label),
+                                // セッション ID は UUID で読めないので、代わりにプロセスを示す
+                                secondary: hold.pid > 0 ? "pid \(hold.pid)" : "プロセス非依存"
                             )
                         },
                         emptyText: "承認待ち / 待機中"
