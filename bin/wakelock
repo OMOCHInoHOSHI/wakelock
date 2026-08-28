@@ -1,0 +1,556 @@
+#!/usr/bin/env bash
+# wakelock - Mac の蓋を閉じたまま CLI エージェントを走らせるためのスリープ制御
+#
+# 二段構えのロックで「作業中だけスリープ無効」を実現する。
+#   arm  : 「このセッションは蓋閉じ運用したい」という意思表示 (run / on が作る)
+#   hold : 「今まさに作業中」の印 (hooks / plugin が acquire / release で作る)
+# SleepDisabled=1 にするのは arm と hold が両方存在するときだけ。
+# 承認待ちで hold が外れれば macOS 標準のスリープタイマーに戻る。
+
+set -uo pipefail
+
+STATE_DIR="${WAKELOCK_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/wakelock}"
+HELPER="${WAKELOCK_HELPER:-/usr/local/libexec/sleep-toggle-helper}"
+# テストから差し替えられるよう外部コマンドは変数経由で呼ぶ
+PMSET="${WAKELOCK_PMSET:-/usr/bin/pmset}"
+# ":-" ではなく "-" を使い、空文字を指定した場合は sudo なしで実行させる (テスト用)
+SUDO="${WAKELOCK_SUDO-sudo -n}"
+ARM_DIR="$STATE_DIR/arm"
+HOLD_DIR="$STATE_DIR/hold"
+LOCK_DIR="$STATE_DIR/.lock"
+GUARD_PID="$STATE_DIR/guard.pid"
+LOG="$STATE_DIR/log"
+
+GUARD_INTERVAL="${WAKELOCK_GUARD_INTERVAL:-20}"
+DEFAULT_ON_DURATION="${WAKELOCK_DEFAULT_DURATION:-2h}"
+
+SELF="$0"
+case "$SELF" in
+  /*) ;;
+  *) SELF="$(cd "$(dirname "$SELF")" && pwd)/$(basename "$SELF")" ;;
+esac
+
+# ---------------------------------------------------------------- 基本ユーティリティ
+
+log() {
+  mkdir -p "$STATE_DIR"
+  printf '%s [%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$*" >>"$LOG" 2>/dev/null
+}
+
+die() {
+  printf 'wakelock: %s\n' "$*" >&2
+  exit 1
+}
+
+now() { date +%s; }
+
+# "90m" "2h" "45s" "30" (数値のみは分) を秒に変換する
+parse_duration() {
+  local raw="$1" num unit
+  case "$raw" in
+    *[!0-9smhSMH]*) return 1 ;;
+  esac
+  num="${raw%[smhSMH]}"
+  unit="${raw#$num}"
+  [ -z "$num" ] && return 1
+  case "$num" in *[!0-9]*) return 1 ;; esac
+  case "$unit" in
+    s|S) echo $(( num )) ;;
+    h|H) echo $(( num * 3600 )) ;;
+    m|M|'') echo $(( num * 60 )) ;;
+    *) return 1 ;;
+  esac
+}
+
+# 与えられた文字列を状態ファイル名に使える形へ落とす
+sanitize() {
+  printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96
+}
+
+alive() {
+  local pid="${1:-}"
+  [ -n "$pid" ] || return 1
+  case "$pid" in *[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null
+}
+
+# ---------------------------------------------------------------- 排他制御
+
+lock() {
+  mkdir -p "$STATE_DIR"
+  local waited=0 lock_mtime lock_age
+  while ! mkdir "$LOCK_DIR" 2>/dev/null; do
+    # 30 秒以上放置されたロックは持ち主が死んだものとみなす。
+    # BSD find の -mmin は小数を受け付けないため mtime を直接比較する。
+    lock_mtime="$(stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0)"
+    lock_age=$(( $(now) - lock_mtime ))
+    if [ "$lock_age" -gt 30 ]; then
+      log "放置されたロックを解放しました (${lock_age}s)"
+      rmdir "$LOCK_DIR" 2>/dev/null
+      continue
+    fi
+    waited=$((waited + 1))
+    [ "$waited" -gt 200 ] && die "ロックを取得できませんでした: $LOCK_DIR"
+    sleep 0.05
+  done
+  trap 'unlock' EXIT INT TERM
+}
+
+unlock() {
+  rmdir "$LOCK_DIR" 2>/dev/null
+}
+
+# ---------------------------------------------------------------- pmset 制御
+
+# SleepDisabled は 0 のとき pmset -g に現れないことがあるため、
+# 見つからなければ 0 とみなす。
+current_disablesleep() {
+  "$PMSET" -g 2>/dev/null \
+    | /usr/bin/awk '$1 == "SleepDisabled" { print $2; found = 1 } END { if (!found) print 0 }'
+}
+
+apply_disablesleep() {
+  local want="$1" cur
+  cur="$(current_disablesleep)"
+  [ "$cur" = "$want" ] && return 0
+
+  if [ ! -x "$HELPER" ]; then
+    log "helper が見つかりません: $HELPER"
+    return 1
+  fi
+  if $SUDO "$HELPER" "$want" >/dev/null 2>&1; then
+    log "SleepDisabled $cur -> $want"
+    return 0
+  fi
+  log "helper の実行に失敗しました (want=$want)"
+  return 1
+}
+
+# ---------------------------------------------------------------- 状態の読み書き
+
+# arm ファイル: 1行目 PID / 2行目 期限(epoch, 0 は無期限) / 3行目 ラベル
+arm_write() {
+  mkdir -p "$ARM_DIR"
+  printf '%s\n%s\n%s\n' "$2" "$3" "$4" >"$ARM_DIR/$(sanitize "$1")"
+}
+
+# hold ファイル: 1行目 PID / 2行目 ラベル
+hold_write() {
+  mkdir -p "$HOLD_DIR"
+  printf '%s\n%s\n' "$2" "$3" >"$HOLD_DIR/$(sanitize "$1")"
+}
+
+arm_remove()  { rm -f "$ARM_DIR/$(sanitize "$1")"; }
+hold_remove() { rm -f "$HOLD_DIR/$(sanitize "$1")"; }
+
+count_dir() {
+  local d="$1" n=0 f
+  [ -d "$d" ] || { echo 0; return; }
+  for f in "$d"/*; do
+    [ -e "$f" ] || continue
+    n=$((n + 1))
+  done
+  echo "$n"
+}
+
+# 死んだプロセスや期限切れの arm / hold を掃除する
+prune() {
+  local f pid expiry t
+  t="$(now)"
+
+  if [ -d "$ARM_DIR" ]; then
+    for f in "$ARM_DIR"/*; do
+      [ -e "$f" ] || continue
+      pid="$(sed -n '1p' "$f" 2>/dev/null)"
+      expiry="$(sed -n '2p' "$f" 2>/dev/null)"
+      if ! alive "$pid"; then
+        log "arm 失効 (プロセス終了): $(basename "$f")"
+        rm -f "$f"
+        continue
+      fi
+      if [ -n "$expiry" ] && [ "$expiry" != "0" ] && [ "$t" -ge "$expiry" ]; then
+        log "arm 失効 (期限切れ): $(basename "$f")"
+        rm -f "$f"
+      fi
+    done
+  fi
+
+  if [ -d "$HOLD_DIR" ]; then
+    for f in "$HOLD_DIR"/*; do
+      [ -e "$f" ] || continue
+      pid="$(sed -n '1p' "$f" 2>/dev/null)"
+      if ! alive "$pid"; then
+        log "hold 失効 (プロセス終了): $(basename "$f")"
+        rm -f "$f"
+      fi
+    done
+  fi
+}
+
+# arm と hold が両方あるときだけスリープを無効化する
+reconcile() {
+  prune
+  local arms holds want
+  arms="$(count_dir "$ARM_DIR")"
+  holds="$(count_dir "$HOLD_DIR")"
+  if [ "$arms" -gt 0 ] && [ "$holds" -gt 0 ]; then
+    want=1
+  else
+    want=0
+  fi
+  apply_disablesleep "$want"
+}
+
+# ---------------------------------------------------------------- 常駐ガード
+
+ensure_guard() {
+  local pid
+  pid="$(cat "$GUARD_PID" 2>/dev/null)"
+  alive "$pid" && return 0
+  nohup "$SELF" guard >>"$LOG" 2>&1 &
+  echo $! >"$GUARD_PID"
+  log "ガード起動 pid=$!"
+}
+
+cmd_guard() {
+  log "ガード開始 interval=${GUARD_INTERVAL}s"
+  while :; do
+    sleep "$GUARD_INTERVAL"
+    lock
+    prune
+    reconcile
+    local arms
+    arms="$(count_dir "$ARM_DIR")"
+    unlock
+    trap - EXIT INT TERM
+    [ "$arms" -eq 0 ] && break
+  done
+  lock
+  apply_disablesleep 0
+  rm -f "$GUARD_PID"
+  unlock
+  log "ガード終了"
+}
+
+# ---------------------------------------------------------------- 呼び出し元 PID の解決
+
+# hooks は CLI の子プロセスとして起動されるため、祖先を辿って
+# claude / opencode 本体の PID を割り出す。見つからなければ $PPID を使う。
+find_owner_pid() {
+  local p="${1:-$PPID}" n=0 comm
+  while [ -n "$p" ] && [ "$p" -gt 1 ] && [ "$n" -lt 12 ]; do
+    comm="$(ps -o comm= -p "$p" 2>/dev/null | sed 's:.*/::')"
+    case "$comm" in
+      claude|claude.exe|opencode|node|bun) echo "$p"; return 0 ;;
+    esac
+    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+    n=$((n + 1))
+  done
+  echo "${1:-$PPID}"
+}
+
+# 指定 PID の祖先チェーンを列挙する
+ancestors() {
+  local p="${1:-$$}" n=0
+  while [ -n "$p" ] && [ "$p" -gt 1 ] && [ "$n" -lt 24 ]; do
+    echo "$p"
+    p="$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')"
+    n=$((n + 1))
+  done
+}
+
+# この PID が属するセッションが arm 済みかを判定する。
+# arm されていないセッションからの acquire は無視され、これが opt-in の担保になる。
+armed_for() {
+  local pid="$1" f apid chain
+  [ -d "$ARM_DIR" ] || return 1
+  chain="$(ancestors "$pid")"
+  for f in "$ARM_DIR"/*; do
+    [ -e "$f" ] || continue
+    apid="$(sed -n '1p' "$f" 2>/dev/null)"
+    [ "$apid" = "0" ] && return 0
+    printf '%s\n' "$chain" | grep -qx "$apid" && return 0
+  done
+  return 1
+}
+
+# ---------------------------------------------------------------- サブコマンド
+
+RUN_ARMID=""
+
+run_cleanup() {
+  [ -n "$RUN_ARMID" ] || return 0
+  local id="$RUN_ARMID"
+  RUN_ARMID=""
+  lock
+  arm_remove "$id"
+  hold_remove "$id"
+  reconcile
+  unlock
+  trap - EXIT INT TERM
+}
+
+cmd_run() {
+  local mode="" duration="" secs expiry=0 base armid rc
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --hooked) mode=hooked; shift ;;
+      --always) mode=always; shift ;;
+      --for)    duration="${2:-}"; shift 2 ;;
+      --)       shift; break ;;
+      -*)       die "不明なオプション: $1" ;;
+      *)        break ;;
+    esac
+  done
+  [ $# -gt 0 ] || die "実行するコマンドを指定してください (例: wakelock run claude)"
+
+  base="$(basename "$1")"
+  if [ -z "$mode" ]; then
+    # hooks / plugin を仕込んである CLI は作業中だけロックを取る。
+    # それ以外はプロセスが生きている間ずっとロックする。
+    case "$base" in
+      claude|claude.exe|opencode) mode=hooked ;;
+      *) mode=always ;;
+    esac
+  fi
+
+  if [ -n "$duration" ]; then
+    secs="$(parse_duration "$duration")" || die "期間の書式が不正です: $duration (例: 90m, 2h, 45s)"
+    expiry=$(( $(now) + secs ))
+  fi
+
+  armid="run-$$"
+  RUN_ARMID="$armid"
+  lock
+  arm_write "$armid" "$$" "$expiry" "$base"
+  [ "$mode" = always ] && hold_write "$armid" "$$" "$base"
+  ensure_guard
+  reconcile
+  unlock
+  trap 'run_cleanup' EXIT INT TERM
+
+  printf 'wakelock: %s を %s モードで監視します (解除は自動)\n' "$base" "$mode" >&2
+  "$@"
+  rc=$?
+  run_cleanup
+  exit "$rc"
+}
+
+cmd_on() {
+  local mode=always duration="" secs expiry
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --hooked) mode=hooked; shift ;;
+      --always) mode=always; shift ;;
+      -*) die "不明なオプション: $1" ;;
+      *) duration="$1"; shift ;;
+    esac
+  done
+  [ -n "$duration" ] || duration="$DEFAULT_ON_DURATION"
+  secs="$(parse_duration "$duration")" || die "期間の書式が不正です: $duration (例: 90m, 2h)"
+  expiry=$(( $(now) + secs ))
+
+  lock
+  # PID 0 は「プロセスに紐付かない手動 arm」を意味し、期限だけで失効する
+  arm_write manual 0 "$expiry" "manual"
+  if [ "$mode" = always ]; then
+    hold_write manual 0 "manual"
+  else
+    hold_remove manual
+  fi
+  ensure_guard
+  reconcile
+  unlock
+
+  printf 'wakelock: %s まで有効化しました (%s モード)\n' "$(date -r "$expiry" '+%H:%M')" "$mode"
+}
+
+cmd_off() {
+  lock
+  rm -rf "$ARM_DIR" "$HOLD_DIR"
+  apply_disablesleep 0
+  unlock
+  echo "wakelock: すべて解除しました"
+}
+
+cmd_status() {
+  local f pid expiry label sd guard remain
+  sd="$(current_disablesleep)"
+  guard="$(cat "$GUARD_PID" 2>/dev/null)"
+
+  printf 'SleepDisabled : %s%s\n' "$sd" "$([ "$sd" = 1 ] && echo '  (蓋を閉じても動作します)' || echo '  (通常のスリープ設定)')"
+  if alive "$guard"; then
+    printf 'ガード        : 稼働中 (pid %s)\n' "$guard"
+  else
+    printf 'ガード        : 停止中\n'
+  fi
+
+  printf '\narm (蓋閉じ運用の意思表示):\n'
+  if [ "$(count_dir "$ARM_DIR")" -eq 0 ]; then
+    printf '  なし\n'
+  else
+    for f in "$ARM_DIR"/*; do
+      [ -e "$f" ] || continue
+      pid="$(sed -n '1p' "$f")"; expiry="$(sed -n '2p' "$f")"; label="$(sed -n '3p' "$f")"
+      if [ "$expiry" = "0" ] || [ -z "$expiry" ]; then
+        remain="無期限"
+      else
+        remain="残り $(( (expiry - $(now)) / 60 )) 分"
+      fi
+      printf '  %-24s pid=%-8s %s  [%s]\n' "$(basename "$f")" "$pid" "$remain" "$label"
+    done
+  fi
+
+  printf '\nhold (現在作業中):\n'
+  if [ "$(count_dir "$HOLD_DIR")" -eq 0 ]; then
+    printf '  なし\n'
+  else
+    for f in "$HOLD_DIR"/*; do
+      [ -e "$f" ] || continue
+      pid="$(sed -n '1p' "$f")"; label="$(sed -n '2p' "$f")"
+      printf '  %-24s pid=%-8s [%s]\n' "$(basename "$f")" "$pid" "$label"
+    done
+  fi
+}
+
+cmd_acquire() {
+  local id="" pid="" label="hook"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --pid)   pid="${2:-}"; shift 2 ;;
+      --label) label="${2:-hook}"; shift 2 ;;
+      *)       [ -z "$id" ] && id="$1"; shift ;;
+    esac
+  done
+  [ -n "$id" ] || die "acquire には ID が必要です"
+  [ -n "$pid" ] || pid="$(find_owner_pid "$PPID")"
+
+  # arm されていないセッションからの acquire は黙って無視する
+  armed_for "$pid" || return 0
+
+  local file="$HOLD_DIR/$(sanitize "$id")"
+  # 既に同じ内容の hold があれば pmset を叩かず即返す (毎ツール呼び出しの負荷を避ける)
+  if [ -f "$file" ] && [ "$(sed -n '1p' "$file")" = "$pid" ]; then
+    return 0
+  fi
+
+  lock
+  hold_write "$id" "$pid" "$label"
+  ensure_guard
+  reconcile
+  unlock
+}
+
+cmd_release() {
+  local id="${1:-}"
+  [ -n "$id" ] || die "release には ID が必要です"
+  [ -f "$HOLD_DIR/$(sanitize "$id")" ] || return 0
+  lock
+  hold_remove "$id"
+  reconcile
+  unlock
+}
+
+# hooks / plugin から stdin の JSON を受け取る入口。
+# CLI 本体の動作を妨げないよう、何があっても終了コード 0 を返す。
+cmd_hook() {
+  local action="${1:-}" payload id
+  payload="$(cat 2>/dev/null)"
+  id="$(printf '%s' "$payload" | /usr/bin/jq -r '.session_id // .sessionID // empty' 2>/dev/null)"
+  [ -n "$id" ] || id="fallback-$(find_owner_pid "$PPID")"
+
+  case "$action" in
+    acquire) cmd_acquire "$id" --label claude ;;
+    release) cmd_release "$id" ;;
+    *)       log "hook: 不明なアクション $action" ;;
+  esac
+  return 0
+}
+
+cmd_doctor() {
+  local ok=0
+  printf '前提条件を確認します\n\n'
+
+  if [ -x "$HELPER" ]; then
+    printf '  [OK]   helper が存在します: %s\n' "$HELPER"
+  else
+    printf '  [NG]   helper がありません: %s\n' "$HELPER"; ok=1
+  fi
+
+  if sudo -n -l 2>/dev/null | grep -qF "$HELPER"; then
+    printf '  [OK]   sudo をパスワードなしで実行できます\n'
+  else
+    printf '  [NG]   sudoers に NOPASSWD 設定がありません\n'; ok=1
+  fi
+
+  if [ -x /usr/bin/jq ]; then
+    printf '  [OK]   jq が利用できます\n'
+  else
+    printf '  [NG]   jq がありません (hooks の JSON 解析に必要)\n'; ok=1
+  fi
+
+  if mkdir -p "$STATE_DIR" 2>/dev/null && [ -w "$STATE_DIR" ]; then
+    printf '  [OK]   状態ディレクトリに書き込めます: %s\n' "$STATE_DIR"
+  else
+    printf '  [NG]   状態ディレクトリに書き込めません: %s\n' "$STATE_DIR"; ok=1
+  fi
+
+  printf '\n現在のスリープ設定 (承認待ちで放置したときの猶予):\n'
+  printf '  バッテリー : ディスプレイオフ %s 分 + スリープ %s 分\n' \
+    "$("$PMSET" -g custom 2>/dev/null | awk '/^Battery/,/^AC/ { if ($1 == "displaysleep") print $2 }' | head -1)" \
+    "$("$PMSET" -g custom 2>/dev/null | awk '/^Battery/,/^AC/ { if ($1 == "sleep") print $2 }' | head -1)"
+
+  [ "$ok" -eq 0 ] && printf '\nすべて問題ありません\n' || printf '\n上記の [NG] を解消してください\n'
+  return "$ok"
+}
+
+usage() {
+  cat <<'USAGE'
+wakelock - Mac の蓋を閉じたまま CLI エージェントを走らせる
+
+使い方:
+  wakelock run [--hooked|--always] [--for <期間>] <コマンド> [引数...]
+      コマンドの実行中だけ有効化する。終了時に自動で解除される。
+      claude / opencode は --hooked が既定で、作業中だけスリープを無効化し、
+      承認待ちで放置されたときは通常のスリープ設定に戻る。
+      それ以外のコマンドは --always が既定で、実行中はずっと無効化する。
+
+  wakelock on [--hooked] [<期間>]
+      実行中のセッションに後から有効化する。既定は 2h で自動失効する。
+
+  wakelock off       すべて解除する
+  wakelock status    現在の状態を表示する
+  wakelock doctor    前提条件を確認する
+
+期間の書式: 90m / 2h / 45s / 30 (数値のみは分)
+
+例:
+  wakelock run claude
+  wakelock run opencode
+  wakelock run --for 3h -- npm run build
+  wakelock on 90m
+USAGE
+}
+
+# ---------------------------------------------------------------- ディスパッチ
+
+main() {
+  local sub="${1:-}"
+  [ $# -gt 0 ] && shift
+  case "$sub" in
+    run)     cmd_run "$@" ;;
+    on)      cmd_on "$@" ;;
+    off)     cmd_off ;;
+    status)  cmd_status ;;
+    doctor)  cmd_doctor ;;
+    acquire) cmd_acquire "$@" ;;
+    release) cmd_release "$@" ;;
+    hook)    cmd_hook "$@" ;;
+    guard)   cmd_guard ;;
+    ''|-h|--help|help) usage ;;
+    *)       printf 'wakelock: 不明なサブコマンド: %s\n\n' "$sub" >&2; usage >&2; exit 64 ;;
+  esac
+}
+
+main "$@"
