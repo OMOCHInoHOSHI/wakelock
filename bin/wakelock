@@ -21,6 +21,7 @@ LOCK_DIR="$STATE_DIR/.lock"
 GUARD_PID="$STATE_DIR/guard.pid"
 LOG="$STATE_DIR/log"
 ENABLED_SINCE="$STATE_DIR/enabled_since"
+AUTO_FLAG="$STATE_DIR/auto"
 
 GUARD_INTERVAL="${WAKELOCK_GUARD_INTERVAL:-20}"
 DEFAULT_ON_DURATION="${WAKELOCK_DEFAULT_DURATION:-2h}"
@@ -429,10 +430,15 @@ status_json() {
     fi | /usr/bin/jq -s '.'
   )"
 
+  local auto="false"
+  [ -f "$AUTO_FLAG" ] && auto="true"
+
   /usr/bin/jq -n \
+    --argjson auto "$auto" \
     --arg sd "${sd:-0}" --arg guard "$guard" --arg since "$since" --arg now "$t" \
     --argjson arms "${arms:-[]}" --argjson holds "${holds:-[]}" '
     {
+      auto: $auto,
       sleepDisabled: ($sd | tonumber),
       guard: {
         running: ($guard != ""),
@@ -456,6 +462,7 @@ cmd_status() {
   sd="$(current_disablesleep)"
   guard="$(cat "$GUARD_PID" 2>/dev/null)"
 
+  printf '自動モード    : %s\n' "$([ -f "$AUTO_FLAG" ] && echo '有効' || echo '無効')"
   printf 'SleepDisabled : %s%s\n' "$sd" "$([ "$sd" = 1 ] && echo '  (蓋を閉じても動作します)' || echo '  (通常のスリープ設定)')"
   if alive "$guard"; then
     printf 'ガード        : 稼働中 (pid %s)\n' "$guard"
@@ -503,9 +510,6 @@ cmd_acquire() {
   [ -n "$id" ] || die "acquire には ID が必要です"
   [ -n "$pid" ] || pid="$(find_owner_pid "$PPID")"
 
-  # arm されていないセッションからの acquire は黙って無視する
-  armed_for "$pid" || return 0
-
   local file="$HOLD_DIR/$(sanitize "$id")"
   # 既に同じ内容の hold があれば pmset を叩かず即返す (毎ツール呼び出しの負荷を避ける)
   if [ -f "$file" ] && [ "$(sed -n '1p' "$file")" = "$pid" ]; then
@@ -513,10 +517,57 @@ cmd_acquire() {
   fi
 
   lock
+  if ! armed_for "$pid"; then
+    if [ -f "$AUTO_FLAG" ]; then
+      # 自動モード: このセッションを自動で arm する。
+      # arm は CLI 本体の PID に束縛するので、CLI が終われば掃除される。
+      arm_write "auto-$pid" "$pid" 0 "$label"
+      log "自動モード: pid=$pid ($label) を arm しました"
+    else
+      # 自動モードでも run でもないセッションは対象外。何もしない。
+      unlock
+      trap - EXIT INT TERM
+      return 0
+    fi
+  fi
   hold_write "$id" "$pid" "$label"
   ensure_guard
   reconcile
   unlock
+}
+
+# 自動モード: hooks / plugin からの acquire だけで完結させる。
+# wakelock run を打たなくても claude / opencode の作業中だけ蓋閉じが有効になる。
+cmd_auto() {
+  case "${1:-status}" in
+    on)
+      mkdir -p "$STATE_DIR"
+      now >"$AUTO_FLAG"
+      echo "wakelock: 自動モードを有効にしました"
+      echo "  claude / opencode を普通に起動するだけで、作業中は蓋を閉じても動作します"
+      ;;
+    off)
+      rm -f "$AUTO_FLAG"
+      lock
+      # 自動で張った arm を取り下げる (手動 arm と run の arm は残す)
+      local f
+      if [ -d "$ARM_DIR" ]; then
+        for f in "$ARM_DIR"/auto-*; do
+          [ -e "$f" ] || continue
+          rm -f "$f"
+        done
+      fi
+      reconcile
+      unlock
+      echo "wakelock: 自動モードを無効にしました"
+      ;;
+    status)
+      [ -f "$AUTO_FLAG" ] && echo "有効" || echo "無効"
+      ;;
+    *)
+      die "使い方: wakelock auto on|off|status"
+      ;;
+  esac
 }
 
 cmd_release() {
@@ -587,6 +638,13 @@ usage() {
 wakelock - Mac の蓋を閉じたまま CLI エージェントを走らせる
 
 使い方:
+  wakelock auto on
+      自動モードを有効にする。以後 claude / opencode を普通に起動するだけで、
+      作業中は蓋を閉じても動き、承認待ちで放置されれば通常のスリープ設定に戻る。
+      コマンドを打ち分ける必要はなくなる。
+  wakelock auto off      自動モードを解除する
+  wakelock auto status   自動モードの状態を表示する
+
   wakelock run [--hooked|--always] [--for <期間>] <コマンド> [引数...]
       コマンドの実行中だけ有効化する。終了時に自動で解除される。
       claude / opencode は --hooked が既定で、作業中だけスリープを無効化し、
@@ -603,10 +661,9 @@ wakelock - Mac の蓋を閉じたまま CLI エージェントを走らせる
 期間の書式: 90m / 2h / 45s / 30 (数値のみは分)
 
 例:
-  wakelock run claude
-  wakelock run opencode
-  wakelock run --for 3h -- npm run build
-  wakelock on 90m
+  wakelock auto on                         一度だけ実行すればあとは自動
+  wakelock run --for 3h -- npm run build   hooks のないコマンドを包む
+  wakelock on 90m                          CLI と無関係に手動で有効化
 USAGE
 }
 
@@ -618,6 +675,7 @@ main() {
   case "$sub" in
     run)     cmd_run "$@" ;;
     on)      cmd_on "$@" ;;
+    auto)    cmd_auto "$@" ;;
     off)     cmd_off ;;
     status)  cmd_status "$@" ;;
     doctor)  cmd_doctor ;;

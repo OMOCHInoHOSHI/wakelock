@@ -5,17 +5,17 @@ struct DecodeTest {
     static func main() {
         let samples: [(String, String)] = [
             ("稼働中", #"""
-            {"sleepDisabled":1,"guard":{"running":true,"pid":26968},"enabledSince":1787943711,
+            {"auto":true,"sleepDisabled":1,"guard":{"running":true,"pid":26968},"enabledSince":1787943711,
              "enabledForSeconds":142,
              "arms":[{"id":"run-4821","pid":4821,"label":"claude","expiry":1787946373,"remaining":2699}],
              "holds":[{"id":"demo-session","pid":3957,"label":"claude"}],"now":1787943853}
             """#),
             ("空", #"""
-            {"sleepDisabled":0,"guard":{"running":false,"pid":null},"enabledSince":null,
+            {"auto":false,"sleepDisabled":0,"guard":{"running":false,"pid":null},"enabledSince":null,
              "enabledForSeconds":null,"arms":[],"holds":[],"now":1787943853}
             """#),
             ("無期限arm", #"""
-            {"sleepDisabled":1,"guard":{"running":true,"pid":1},"enabledSince":1,"enabledForSeconds":9999,
+            {"auto":true,"sleepDisabled":1,"guard":{"running":true,"pid":1},"enabledSince":1,"enabledForSeconds":9999,
              "arms":[{"id":"run-1","pid":1,"label":"opencode","expiry":0,"remaining":null}],
              "holds":[],"now":10000}
             """#),

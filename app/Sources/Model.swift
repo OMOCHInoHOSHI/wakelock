@@ -24,6 +24,8 @@ struct WakelockStatus: Decodable {
         let label: String
     }
 
+    /// 自動モード。有効なら claude / opencode を起動するだけで作業中に蓋閉じが効く。
+    let auto: Bool
     let sleepDisabled: Int
     let `guard`: GuardInfo
     let enabledSince: Int?
@@ -88,6 +90,10 @@ enum WakelockCLI {
     static func disable() {
         run(["off"])
     }
+
+    static func setAuto(_ enabled: Bool) {
+        run(["auto", enabled ? "on" : "off"])
+    }
 }
 
 // MARK: - 画面の状態
@@ -146,6 +152,12 @@ final class WakelockModel: ObservableObject {
         perform { WakelockCLI.disable() }
     }
 
+    func setAuto(_ enabled: Bool) {
+        perform { WakelockCLI.setAuto(enabled) }
+    }
+
+    var autoEnabled: Bool { status?.auto ?? false }
+
     // MARK: 表示用の導出値
 
     var iconName: String {
@@ -159,6 +171,7 @@ final class WakelockModel: ObservableObject {
         guard let status else { return "状態を取得できません" }
         if status.isLidCloseActive { return "蓋を閉じても動作します" }
         if status.isArmed { return "待機中（通常のスリープ設定）" }
+        if status.auto { return "自動モードで待機中" }
         return "通常のスリープ設定"
     }
 

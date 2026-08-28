@@ -75,9 +75,12 @@ struct MenuView: View {
     private var sessions: some View {
         if let status = model.status {
             if status.arms.isEmpty {
-                Text("蓋閉じ運用中のセッションはありません")
+                Text(status.auto
+                     ? "待機中。claude / opencode が作業を始めると自動で有効になります"
+                     : "蓋閉じ運用中のセッションはありません")
                     .font(.callout)
                     .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 VStack(alignment: .leading, spacing: 8) {
                     section(
@@ -155,7 +158,24 @@ struct MenuView: View {
     // MARK: 操作
 
     private var controls: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Toggle(isOn: Binding(
+                    get: { model.autoEnabled },
+                    set: { model.setAuto($0) }
+                )) {
+                    Text("自動モード").font(.callout.weight(.medium))
+                }
+                .toggleStyle(.switch)
+
+                Text("claude / opencode を起動するだけで、作業中は蓋を閉じても動作します")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider()
+
             Text("手動で有効化")
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)

@@ -27,6 +27,16 @@ wakelock はこの `disablesleep` を、CLI エージェントの作業状態に
   プラグインや hooks を常設しても、素の `claude` / `opencode` の挙動は変わらない。
 * arm はあるが hold がない = 承認待ちなど → 通常のスリープ設定に戻る。
 
+opt-in の単位は 2 つある。
+
+| 方法 | arm を作る主体 | 範囲 |
+|---|---|---|
+| 自動モード | hooks 自身（`acquire` 時に `auto-<pid>` を生成） | 以後すべてのセッション |
+| `wakelock run` | ラッパーコマンド | そのプロセスだけ |
+
+自動モードを使えばコマンドを打ち分ける必要がなくなる。`run` は hooks を持たない
+コマンドを包むときと、自動モードを使わず範囲を明示したいときに残る。
+
 ### 猶予時間は macOS のタイマーに任せる
 
 承認待ちになったら即座に `disablesleep 0` に戻す。自前で猶予タイマーは持たない。
@@ -91,16 +101,36 @@ hooks の追記前に `settings.json` のバックアップを同ディレクト
 
 ## 使い方
 
-```sh
-wakelock run claude              # 作業中だけ蓋閉じ有効。終了で自動解除
-wakelock run opencode            # 同上
-wakelock run --for 3h -- npm run build   # hooks のないコマンドは実行中ずっと有効
+### 自動モード（推奨）
 
-wakelock on 90m                  # 実行中のセッションに後から有効化（90分で自動失効）
-wakelock on --hooked 90m         # arm だけ張り、hold は hooks に任せる
+一度有効にすれば、あとはコマンドを打ち分ける必要がない。
+
+```sh
+wakelock auto on
+```
+
+メニューバーアプリのスイッチでも切り替えられる。以後 `claude` / `opencode` を
+普通に起動するだけで、hooks が作業開始を検知して自動で arm する。
+
+* 作業中 → 蓋を閉じても動く
+* 承認待ちで放置 → 通常のスリープ設定に戻る
+* CLI を終了 → arm がプロセスに束縛されているのでガードが片付ける
+
+自動生成された arm は `auto-<pid>` という名前になり、CLI 本体の PID に束縛される。
+`wakelock auto off` で自動モードを切ると、自動生成された arm だけが取り下げられる
+（手動 arm と `run` の arm は残る）。
+
+### そのほか
+
+```sh
+wakelock on 90m                  # CLI と無関係に手動で有効化（90分で自動失効）
 wakelock off                     # すぐに解除
 wakelock status                  # 現在の状態
+wakelock status --json           # GUI 向けの機械可読な状態
 wakelock doctor                  # 前提条件の確認
+
+wakelock run --for 3h -- npm run build   # hooks のないコマンドを包む
+wakelock run claude                      # 自動モードを使わず明示的に arm する
 ```
 
 `run` のモードはコマンド名から自動判定する。`claude` / `opencode` は `--hooked`、
@@ -132,8 +162,9 @@ make test       # JSON デコードの検証
 
 クリックすると開くパネルでできること:
 
+* **自動モードの切り替え**（これだけでコマンド入力は不要になる）
 * arm / hold の一覧と、arm の残り時間
-* 30分 / 90分 / 3時間 の手動有効化
+* 30分 / 1時間 / 3時間 の手動有効化
 * 今すぐ解除
 * ガードの稼働状態
 * 30 分以上連続で有効なときの排熱警告
@@ -170,11 +201,11 @@ opencode 側は `permission.replied` イベントがあるため、ツール呼�
 ## テスト
 
 ```sh
-./test/smoke.sh      # CLI の状態遷移（14 項目）
+./test/smoke.sh      # CLI の状態遷移（21 項目）
 make -C app test     # GUI の JSON デコード（3 パターン）
 ```
 
-`test/smoke.sh` は `pmset` と sudo helper をスタブに差し替え、
+`test/smoke.sh`（21 項目）は `pmset` と sudo helper をスタブに差し替え、
 実際のスリープ設定を変えずに状態遷移を検証する。
 承認待ちで解除されること、承認後に復帰すること、
 コマンドの正常終了・異常終了の両方で解除されること、

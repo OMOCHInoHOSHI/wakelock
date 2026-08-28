@@ -125,5 +125,39 @@ sleep 3
 check 0 "期限切れで自動解除される"
 
 echo
+echo "10. 自動モードなら run を打たなくても hooks だけで完結する"
+echo 0 >"$SLEEP_STATE"
+"$WL" off >/dev/null 2>&1
+"$WL" acquire auto-test --pid $$ --label claude >/dev/null 2>&1
+check 0 "自動モード無効なら acquire は無視される"
+
+"$WL" auto on >/dev/null 2>&1
+"$WL" acquire auto-test --pid $$ --label claude >/dev/null 2>&1
+check 1 "自動モード有効なら acquire だけで蓋閉じが有効になる"
+arms_now="$(ls "$WAKELOCK_STATE_DIR/arm" 2>/dev/null | tr '\n' ' ')"
+printf '  自動生成された arm: %s\n' "$arms_now"
+if printf '%s' "$arms_now" | grep -q "auto-$$"; then
+  printf '  \033[32mPASS\033[0m  呼び出し元 PID に束縛された arm が作られる\n'; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  arm が作られていない\n'; FAIL=$((FAIL + 1))
+fi
+
+"$WL" release auto-test >/dev/null 2>&1
+check 0 "承認待ちでは解除される (自動モードでも要件2は維持)"
+
+"$WL" acquire auto-test --pid $$ --label claude >/dev/null 2>&1
+check 1 "再開で復帰する"
+
+echo
+echo "11. 自動モードを切ると自動生成された arm も取り下げられる"
+"$WL" auto off >/dev/null 2>&1
+check 0 "解除される"
+if [ -z "$(ls "$WAKELOCK_STATE_DIR/arm" 2>/dev/null)" ]; then
+  printf '  \033[32mPASS\033[0m  自動生成の arm が消える\n'; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  arm が残っている\n'; FAIL=$((FAIL + 1))
+fi
+
+echo
 printf '結果: \033[32m%d PASS\033[0m / \033[31m%d FAIL\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
