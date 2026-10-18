@@ -26,6 +26,8 @@ PMSET_EOF
 
 cat >"$WORK/helper" <<HELPER_EOF
 #!/usr/bin/env bash
+# broken フラグがあると失敗する (helper の実行失敗を再現する)
+[ -f "$WORK/helper_broken" ] && exit 1
 echo "\$1" >"$SLEEP_STATE"
 HELPER_EOF
 
@@ -376,6 +378,65 @@ if [ -f "$WAKELOCK_STATE_DIR/guard.pid" ]; then
 else
   printf '  \033[32mPASS\033[0m  ガードが終了している\n'; PASS=$((PASS + 1))
 fi
+
+echo
+echo "18. 見張りは有効にした直後から働き、適用の失敗や読み取り失敗では空回りしない"
+"$WL" auto off >/dev/null 2>&1
+"$WL" off >/dev/null 2>&1
+wait_guard_gone
+rm -f "$WAKELOCK_STATE_DIR/overrides" "$WORK/helper_broken" "$WORK/pmset_broken"
+: >"$WAKELOCK_STATE_DIR/log"
+echo 0 >"$SLEEP_STATE"
+
+lasthour() { "$WL" status --json 2>/dev/null | jq -r '.overrides.lastHour'; }
+
+# arm だけの状態 (まだ無効) でガードを起動し、後から acquire で有効にする。
+# hooks がプロンプトごとに有効にする流れと同じ
+WAKELOCK_GUARD_INTERVAL=6 WAKELOCK_GUARD_WATCH_INTERVAL=1 "$WL" on --hooked 10m >/dev/null 2>&1
+sleep 1.5
+"$WL" acquire s18 --pid $$ --label claude >/dev/null 2>&1
+check 1 "acquire で有効になる"
+echo 0 >"$SLEEP_STATE"
+wait_for 1 3
+check 1 "有効にした直後でも、通常の間隔 (6 秒) より短い 3 秒以内に戻される"
+
+# 適用に失敗し続けても、上書きとして数え続けない
+rm -f "$WAKELOCK_STATE_DIR/overrides"
+: >"$WORK/helper_broken"
+echo 0 >"$SLEEP_STATE"
+sleep 8   # 見張り (1 秒) と巡回 (6 秒) を何度か回す
+got="$(lasthour)"
+if [ "$got" = "1" ]; then
+  printf '  \033[32mPASS\033[0m  helper が失敗し続けても上書きは 1 回だけ数える\n'; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  helper の失敗中の上書きの回数 (期待 1 / 実際 %s)\n' "$got"; FAIL=$((FAIL + 1))
+fi
+rm -f "$WORK/helper_broken"
+wait_for 1 8
+check 1 "helper が直ると巡回で 1 に戻る"
+got="$(lasthour)"
+if [ "$got" = "1" ]; then
+  printf '  \033[32mPASS\033[0m  復旧は上書きに数えない\n'; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  復旧が上書きに数えられた (期待 1 / 実際 %s)\n' "$got"; FAIL=$((FAIL + 1))
+fi
+
+# pmset が読めない間は、見張りが再計算を起こさない (巡回の分は起きてよい)
+sleep 1
+: >"$WAKELOCK_STATE_DIR/log"
+: >"$WORK/pmset_broken"
+sleep 3.5
+rm -f "$WORK/pmset_broken"
+n="$(grep -c "読み取れず" "$WAKELOCK_STATE_DIR/log" 2>/dev/null)"
+if [ "${n:-0}" -le 1 ]; then
+  printf '  \033[32mPASS\033[0m  pmset が読めない間、見張りは再計算を起こさない (%s 回)\n' "${n:-0}"; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  pmset が読めない間に再計算が続いた (期待 1 回以下 / 実際 %s 回)\n' "$n"; FAIL=$((FAIL + 1))
+fi
+
+"$WL" release s18 >/dev/null 2>&1
+"$WL" off >/dev/null 2>&1
+wait_guard_gone
 
 echo
 printf '結果: \033[32m%d PASS\033[0m / \033[31m%d FAIL\033[0m\n' "$PASS" "$FAIL"

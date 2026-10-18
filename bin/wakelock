@@ -171,8 +171,11 @@ apply_disablesleep() {
     record_override "$want" "$cur"
   fi
 
+  # 適用できなかったら、自分が整えた値は分からなくなる。applied を消して、
+  # 失敗が続く間の不一致を外部による上書きとして数え続けないようにする
   if [ ! -x "$HELPER" ]; then
     log "helper が見つかりません: $HELPER"
+    rm -f "$APPLIED"
     return 1
   fi
   if $SUDO "$HELPER" "$want" >/dev/null 2>&1; then
@@ -188,6 +191,7 @@ apply_disablesleep() {
     return 0
   fi
   log "helper の実行に失敗しました (want=$want)"
+  rm -f "$APPLIED"
   return 1
 }
 
@@ -264,9 +268,7 @@ prune() {
   fi
 }
 
-# arm と hold が両方あるときだけスリープを無効化する。
-# 求めた値は RECONCILED に残す (ガードが見張るかどうかの判断に使う)
-RECONCILED=0
+# arm と hold が両方あるときだけスリープを無効化する
 reconcile() {
   prune
   local arms holds want
@@ -277,7 +279,6 @@ reconcile() {
   else
     want=0
   fi
-  RECONCILED="$want"
   apply_disablesleep "$want"
 }
 
@@ -292,26 +293,36 @@ ensure_guard() {
   log "ガード起動 pid=$!"
 }
 
+# 有効にしてあるはずなのに、外部から 0 に戻されているか。
+# 見張りは頻繁に回るので、arm / hold の数え上げ (外部プロセスを起こさない) と applied で
+# 絞り込み、pmset を読むのは有効中だけにする。
+# 自分の適用が失敗している間 (applied がない) や、pmset が読めない間は、通常の間隔に任せる。
+# 見張りが毎回再計算を起こして、失敗のログを積み上げないようにするため。
+overridden_while_active() {
+  local applied=""
+  [ "$(count_dir "$ARM_DIR")" -gt 0 ] && [ "$(count_dir "$HOLD_DIR")" -gt 0 ] || return 1
+  [ -f "$APPLIED" ] && read -r applied <"$APPLIED"
+  [ "$applied" = 1 ] || return 1
+  [ "$(current_disablesleep)" = 0 ]
+}
+
 cmd_guard() {
   log "ガード開始 interval=${GUARD_INTERVAL}s watch=${GUARD_WATCH_INTERVAL}s"
-  local arms waited=0
-  # 起動直後から見張れるよう、今の望ましい状態だけを読む。
-  # ガードを起動する側はロックを持ったまま起動し、適用も済ませているので、ここでは
-  # ロックを取らない。取ると、起動した側の処理が長引いたときにロック待ちで諦めて終わってしまう
-  if [ "$(count_dir "$ARM_DIR")" -gt 0 ] && [ "$(count_dir "$HOLD_DIR")" -gt 0 ]; then
-    RECONCILED=1
-  fi
+  local arms step="$GUARD_INTERVAL" waited=0
+  # 見張りの間隔は整数秒。不正な値や、通常の間隔以上の値なら見張らない
+  case "$GUARD_WATCH_INTERVAL" in
+    ''|*[!0-9]*) ;;
+    *) if [ "$GUARD_WATCH_INTERVAL" -gt 0 ] && [ "$GUARD_WATCH_INTERVAL" -lt "$GUARD_INTERVAL" ]; then
+         step="$GUARD_WATCH_INTERVAL"
+       fi ;;
+  esac
   while :; do
-    # 有効中は短い間隔で SleepDisabled だけを見張り、外部からの上書きをすぐ戻す。
-    # 掃除と再計算は通常の間隔で行う。見張りで起こすプロセスを pmset だけに抑えるため
-    if [ "$RECONCILED" = 1 ] && [ "$GUARD_WATCH_INTERVAL" -lt "$GUARD_INTERVAL" ]; then
-      sleep "$GUARD_WATCH_INTERVAL"
-      waited=$((waited + GUARD_WATCH_INTERVAL))
-      if [ "$waited" -lt "$GUARD_INTERVAL" ] && [ "$(current_disablesleep)" = 1 ]; then
-        continue
-      fi
-    else
-      sleep "$GUARD_INTERVAL"
+    # 短い間隔で回り、通常の間隔に満たない回は外部からの上書きだけを見る。
+    # 有効になったかどうかは毎回数え直すので、hooks が有効にした直後から見張れる
+    sleep "$step"
+    waited=$((waited + step))
+    if [ "$waited" -lt "$GUARD_INTERVAL" ] && ! overridden_while_active; then
+      continue
     fi
     waited=0
     lock
