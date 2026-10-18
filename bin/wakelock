@@ -284,10 +284,15 @@ reconcile() {
 
 # ---------------------------------------------------------------- 常駐ガード
 
+# ガードが生きているか。acquire の高速パスで毎回呼ぶので、外部プロセスを起こさない
+guard_alive() {
+  local pid=""
+  [ -f "$GUARD_PID" ] && read -r pid <"$GUARD_PID"
+  alive "$pid"
+}
+
 ensure_guard() {
-  local pid
-  pid="$(cat "$GUARD_PID" 2>/dev/null)"
-  alive "$pid" && return 0
+  guard_alive && return 0
   nohup "$SELF" guard >>"$LOG" 2>&1 &
   echo $! >"$GUARD_PID"
   log "ガード起動 pid=$!"
@@ -652,8 +657,10 @@ cmd_acquire() {
   [ -n "$pid" ] || pid="$(find_owner_pid "$PPID")"
 
   local file="$HOLD_DIR/$(sanitize "$id")"
-  # 既に同じ内容の hold があれば pmset を叩かず即返す (毎ツール呼び出しの負荷を避ける)
-  if [ -f "$file" ] && [ "$(sed -n '1p' "$file")" = "$pid" ]; then
+  # 既に同じ内容の hold があれば pmset を叩かず即返す (毎ツール呼び出しの負荷を避ける)。
+  # ただしガードが死んでいたら通常の経路で起動し直す。作業中は高速パスばかりを通るので、
+  # ここで見ないと、ガードが落ちたまま (クラッシュ時に解除する者がいないまま) 作業が続いてしまう
+  if [ -f "$file" ] && [ "$(sed -n '1p' "$file")" = "$pid" ] && guard_alive; then
     return 0
   fi
 

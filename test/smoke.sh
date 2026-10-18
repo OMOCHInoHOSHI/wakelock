@@ -439,5 +439,50 @@ fi
 wait_guard_gone
 
 echo
+echo "19. 作業中にガードが落ちても、次の acquire (高速パス) で起動し直す"
+"$WL" auto off >/dev/null 2>&1
+"$WL" off >/dev/null 2>&1
+wait_guard_gone
+: >"$WAKELOCK_STATE_DIR/log"
+echo 0 >"$SLEEP_STATE"
+
+guard_running() {
+  local g
+  g="$(cat "$WAKELOCK_STATE_DIR/guard.pid" 2>/dev/null)"
+  [ -n "$g" ] && kill -0 "$g" 2>/dev/null
+}
+
+"$WL" on --hooked 10m >/dev/null 2>&1
+"$WL" acquire s19 --pid $$ --label claude >/dev/null 2>&1
+check 1 "作業中で有効"
+old_guard="$(cat "$WAKELOCK_STATE_DIR/guard.pid" 2>/dev/null)"
+
+# 同じ hold への acquire はガードが生きていれば高速パスで返り、ガードを増やさない
+"$WL" acquire s19 --pid $$ --label claude >/dev/null 2>&1
+n="$(grep -c "ガード起動" "$WAKELOCK_STATE_DIR/log" 2>/dev/null)"
+if [ "$n" = "1" ]; then
+  printf '  \033[32mPASS\033[0m  ガードが生きていれば高速パスのまま (ガード起動 %s 回)\n' "$n"; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  ガードの起動回数 (期待 1 / 実際 %s)\n' "$n"; FAIL=$((FAIL + 1))
+fi
+
+# ガードを落とす (クラッシュを模す)。guard.pid は古い PID のまま残る
+kill "$old_guard" 2>/dev/null
+i=0
+while kill -0 "$old_guard" 2>/dev/null && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+
+"$WL" acquire s19 --pid $$ --label claude >/dev/null 2>&1
+if guard_running && [ "$(cat "$WAKELOCK_STATE_DIR/guard.pid")" != "$old_guard" ]; then
+  printf '  \033[32mPASS\033[0m  落ちたガードを次の acquire で起動し直す\n'; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  ガードが起動し直されていない\n'; FAIL=$((FAIL + 1))
+fi
+check 1 "起動し直しても有効のまま"
+
+"$WL" release s19 >/dev/null 2>&1
+"$WL" off >/dev/null 2>&1
+wait_guard_gone
+
+echo
 printf '結果: \033[32m%d PASS\033[0m / \033[31m%d FAIL\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
