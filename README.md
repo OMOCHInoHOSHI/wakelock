@@ -199,6 +199,8 @@ wakelock は最後に自分が整えた値を覚えておき、自分が変え�
 （`WAKELOCK_GUARD_WATCH_INTERVAL`）。掃除と再計算は 20 秒ごとのまま。
 
 書き換えは `wakelock status` と `wakelock doctor` で確認できる。
+メニューバーのパネルにも、直近 1 時間に書き換えがあれば回数と最終時刻を添えて警告を出す
+（`status --json` の `overrides` を読む。このフィールドを返さない古い CLI と組み合わせた場合は出さない）。
 
 戻すまでの間に寝てしまう可能性は残る。設定が変わった瞬間に macOS が寝るかは未検証。
 根本的には、そのアプリのスリープ設定を見直すか、蓋閉じ運用中は終了する。
@@ -337,7 +339,7 @@ make test       # デコードと表示ラベルの検証
 
 ```sh
 ./test/smoke.sh      # CLI の状態遷移（55 項目）
-make -C app test     # GUI のデコード 3 パターンと表示ラベル 10 項目
+make -C app test     # GUI のデコードと表示（32 項目）
 node test/opencode-plugin.mjs   # opencode プラグイン（100 項目）
 ```
 
@@ -379,4 +381,5 @@ node test/opencode-plugin.mjs   # opencode プラグイン（100 項目）
 **カバンに入れた状態での長時間実行は避けること**。
 
 メニューバーは、無期限で有効化している間と、有効化から 30 分が経過した時点で
-排熱の注意を表示する。`wakelock status` でも現在の状態をいつでも確認できる。
+排熱の注意を表示する。他のアプリが蓋閉じの設定を書き換えているときも警告を出す。
+`wakelock status` でも現在の状態をいつでも確認できる。

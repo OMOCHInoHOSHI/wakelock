@@ -24,6 +24,14 @@ struct WakelockStatus: Decodable {
         let label: String
     }
 
+    /// 外部からの SleepDisabled 上書きの検出結果。
+    struct Overrides: Decodable {
+        /// 最後に検出した時刻（epoch 秒）。一度もなければ nil。
+        let last: Int?
+        /// 直近 1 時間の検出回数。
+        let lastHour: Int
+    }
+
     /// 自動モード。有効なら claude / opencode を起動するだけで作業中に蓋閉じが効く。
     let auto: Bool
     let sleepDisabled: Int
@@ -34,6 +42,25 @@ struct WakelockStatus: Decodable {
     let arms: [Arm]
     let holds: [Hold]
     let now: Int
+    /// 他のアプリによる SleepDisabled の書き換え。古い CLI の JSON には無いので Optional。
+    let overrides: Overrides?
+
+    /// 上書きの警告に使うアイコン。排熱の三角とは別の記号にして、警告の種類を見分けられるようにする。
+    static let overrideWarningSymbol = "exclamationmark.arrow.triangle.2.circlepath"
+
+    /// 直近 1 時間に 1 回以上、他のアプリに書き換えられたら警告する。
+    var shouldWarnOverride: Bool { (overrides?.lastHour ?? 0) >= 1 }
+
+    /// 警告の文言。時刻はローカル時刻の HH:mm（テストでは timeZone を固定できる）。
+    func overrideWarningText(timeZone: TimeZone = .current) -> String {
+        let count = overrides?.lastHour ?? 0
+        var when = ""
+        if let last = overrides?.last {
+            when = "、最終 \(formatClock(last, timeZone: timeZone))"
+        }
+        return "他のアプリが蓋閉じの設定を書き換えています（直近 1 時間に \(count) 回\(when)）。"
+            + "蓋を閉じると寝てしまうことがあります。詳しくは wakelock doctor を参照してください。"
+    }
 
     var isLidCloseActive: Bool { sleepDisabled == 1 }
     var isArmed: Bool { !arms.isEmpty }
@@ -211,6 +238,10 @@ final class WakelockModel: ObservableObject {
         return seconds >= Self.thermalWarningThreshold
     }
 
+    var shouldWarnOverride: Bool { status?.shouldWarnOverride ?? false }
+
+    var overrideWarningText: String { status?.overrideWarningText() ?? "" }
+
     var thermalWarningText: String {
         hasIndefiniteManualArm
             ? "無期限で有効化しています。自動では解除されません。カバンに入れたままだと排熱できません。"
@@ -248,4 +279,13 @@ func formatDuration(_ seconds: Int) -> String {
     if hours > 0 { return "\(hours)時間\(minutes)分" }
     if minutes > 0 { return "\(minutes)分" }
     return "\(total)秒"
+}
+
+/// epoch 秒を HH:mm にする。タイムゾーンはテストで固定できるよう引数にする。
+func formatClock(_ epoch: Int, timeZone: TimeZone = .current) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = timeZone
+    formatter.dateFormat = "HH:mm"
+    return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(epoch)))
 }

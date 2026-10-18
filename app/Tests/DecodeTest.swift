@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 @main
 struct DecodeTest {
@@ -123,6 +124,45 @@ struct DecodeTest {
                 failed += 1
             }
         }
+
+        // 外部からの SleepDisabled 上書きの警告
+        print("\n上書き警告の検証:")
+        func overrideStatus(_ overrides: String?) -> WakelockStatus? {
+            let extra = overrides.map { ",\"overrides\":\($0)" } ?? ""
+            let json = """
+            {"auto":false,"sleepDisabled":1,"guard":{"running":true,"pid":1},
+             "enabledSince":null,"enabledForSeconds":null,
+             "arms":[],"holds":[],"now":1\(extra)}
+            """
+            return try? JSONDecoder().decode(WakelockStatus.self, from: Data(json.utf8))
+        }
+        func check(_ ok: Bool, _ desc: String) {
+            if ok { print("  PASS  \(desc)") } else { print("  FAIL  \(desc)"); failed += 1 }
+        }
+        let jst = TimeZone(identifier: "Asia/Tokyo")!
+        let utc = TimeZone(identifier: "UTC")!
+        // 1792328715 = 2026-10-18 13:05:15 UTC = 22:05:15 JST
+        let withOv = overrideStatus(#"{"last":1792328715,"lastHour":2}"#)
+        check(withOv?.overrides?.last == 1792328715 && withOv?.overrides?.lastHour == 2,
+              "overrides の last と lastHour を読める")
+        check(withOv?.shouldWarnOverride == true, "lastHour が 2 なら警告する")
+        let text = withOv?.overrideWarningText(timeZone: jst) ?? ""
+        check(text.contains("直近 1 時間に 2 回") && text.contains("最終 22:05"), "文言に回数と時刻(JST)が入る: \(text)")
+        check(withOv?.overrideWarningText(timeZone: utc).contains("最終 13:05") == true, "時刻はタイムゾーンに従う(UTC)")
+        let legacy = overrideStatus(nil)
+        check(legacy != nil && legacy?.overrides == nil && legacy?.shouldWarnOverride == false,
+              "overrides が無い古い CLI の JSON でもデコードでき、警告しない")
+        let zero = overrideStatus(#"{"last":1792328715,"lastHour":0}"#)
+        check(zero?.shouldWarnOverride == false, "lastHour が 0 なら警告しない")
+        let never = overrideStatus(#"{"last":null,"lastHour":0}"#)
+        check(never != nil && never?.shouldWarnOverride == false, "last が null でもデコードでき、警告しない")
+        let noLast = overrideStatus(#"{"last":null,"lastHour":1}"#)
+        check(noLast?.overrideWarningText(timeZone: jst).contains("最終") == false, "last が null なら時刻を出さない")
+        check(formatClock(0, timeZone: utc) == "00:00" && formatClock(1792328715, timeZone: jst) == "22:05",
+              "formatClock は HH:mm")
+        check(NSImage(systemSymbolName: WakelockStatus.overrideWarningSymbol, accessibilityDescription: nil) != nil,
+              "SF Symbol \(WakelockStatus.overrideWarningSymbol) が実在する")
+        check(WakelockStatus.overrideWarningSymbol != "exclamationmark.triangle.fill", "排熱警告とは別の記号")
 
         print(failed == 0 ? "\n検証: 全件成功" : "\n失敗 \(failed) 件")
         exit(failed == 0 ? 0 : 1)

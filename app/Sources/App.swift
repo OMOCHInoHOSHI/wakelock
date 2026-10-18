@@ -28,6 +28,7 @@ struct MenuView: View {
                 Divider()
                 sessions
                 if model.shouldWarnThermal { thermalWarning }
+                if model.shouldWarnOverride { overrideWarning }
                 Divider()
                 controls
             }
@@ -149,6 +150,20 @@ struct MenuView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .foregroundStyle(.orange)
             Text(model.thermalWarningText)
+                .font(.caption)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(8)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    // MARK: 外部からの上書きの警告
+
+    private var overrideWarning: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: WakelockStatus.overrideWarningSymbol)
+                .foregroundStyle(.orange)
+            Text(model.overrideWarningText)
                 .font(.caption)
                 .fixedSize(horizontal: false, vertical: true)
         }
