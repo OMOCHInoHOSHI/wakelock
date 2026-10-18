@@ -270,5 +270,40 @@ check 0 "ラッパー終了で run の arm が消え、スリープ可に戻る"
 rm -f "$WORK/opencode_done"
 
 echo
+echo "16. 手動の有効化が期限切れになると hold も消え、自動モードの承認待ちで起き続けない"
+"$WL" auto off >/dev/null 2>&1
+"$WL" off >/dev/null 2>&1
+echo 0 >"$SLEEP_STATE"
+# この節で書かれた行だけを見たいのでログを空にする
+: >"$WAKELOCK_STATE_DIR/log"
+"$WL" on 5s >/dev/null 2>&1
+check 1 "手動の有効化で無効化される"
+check_holds 1 "手動の hold が作られる"
+wait_for 0 15
+check 0 "期限切れで自動解除される"
+check_holds 0 "手動の hold も一緒に消える"
+if grep -q "手動の有効化が終了" "$WAKELOCK_STATE_DIR/log" 2>/dev/null; then
+  printf '  \033[32mPASS\033[0m  hold の失効が記録される\n'; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  hold の失効が記録されていない\n'; FAIL=$((FAIL + 1))
+fi
+
+"$WL" auto on >/dev/null 2>&1
+"$WL" acquire s16 --pid $$ --label claude >/dev/null 2>&1
+check 1 "自動モードのエージェントが作業を始めると有効になる"
+"$WL" release s16 >/dev/null 2>&1
+check 0 "承認待ちで解除され、残った手動の hold で起き続けない"
+"$WL" auto off >/dev/null 2>&1
+"$WL" off >/dev/null 2>&1
+
+"$WL" on 1h >/dev/null 2>&1
+# ガード (GUARD_INTERVAL=1) が何周か回る時間を待つ
+sleep 3
+check_holds 1 "手動の arm が生きている間は手動の hold を消さない"
+check 1 "手動の arm が生きている間は有効のまま"
+"$WL" auto off >/dev/null 2>&1
+"$WL" off >/dev/null 2>&1
+
+echo
 printf '結果: \033[32m%d PASS\033[0m / \033[31m%d FAIL\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]

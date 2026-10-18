@@ -157,6 +157,7 @@ arm の作られ方は 3 通りある。
 
 `pid 0` の手動 arm はすべてのセッションに効く。そのため手動で有効化している間は、
 自動モードが個別の `auto-<pid>` を作らなくても hooks は hold を出し入れできる。
+手動で有効化したときの hold（`pid 0`）は手動の arm に従い、arm が期限切れで消えると一緒に消える。
 
 ### 猶予時間は macOS のタイマーに任せる
 
@@ -319,7 +320,7 @@ make test       # デコードと表示ラベルの検証
 ### テスト
 
 ```sh
-./test/smoke.sh      # CLI の状態遷移（38 項目）
+./test/smoke.sh      # CLI の状態遷移（47 項目）
 make -C app test     # GUI のデコード 3 パターンと表示ラベル 10 項目
 node test/opencode-plugin.mjs   # opencode プラグイン（100 項目）
 ```
@@ -335,6 +336,7 @@ node test/opencode-plugin.mjs   # opencode プラグイン（100 項目）
 * 無期限が期限で失効しないこと
 * 解除後も自動モードなら次の作業で arm が復活すること
 * `pmset` が読めないときも適用され、偽の状態遷移をログに残さないこと
+* 手動の有効化が期限切れになると hold も消え、自動モードのエージェントが承認待ちになったときに起き続けないこと
 * run の arm がラベル一致で子孫でないプロセスからの `acquire` を受け付け、`--match-label` なしやラベル不一致では受け付けないこと
 
 `test/opencode-plugin.mjs` は `wakelock` をスタブに差し替え、偽の 2.0 API にイベントを流して

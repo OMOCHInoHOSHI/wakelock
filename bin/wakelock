@@ -69,10 +69,13 @@ sanitize() {
   printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-96
 }
 
+# PID 0 は「プロセスに紐付かない」印として使うので、生きているとは扱わない。
+# kill -0 0 は自分のプロセスグループへの送信として成功してしまうため、明示的に弾く。
 alive() {
   local pid="${1:-}"
   [ -n "$pid" ] || return 1
   case "$pid" in *[!0-9]*) return 1 ;; esac
+  [ "$pid" -gt 0 ] || return 1
   kill -0 "$pid" 2>/dev/null
 }
 
@@ -183,7 +186,7 @@ count_dir() {
 
 # 死んだプロセスや期限切れの arm / hold を掃除する
 prune() {
-  local f pid expiry t
+  local f pid expiry t manual_arm=0
   t="$(now)"
 
   if [ -d "$ARM_DIR" ]; then
@@ -191,7 +194,8 @@ prune() {
       [ -e "$f" ] || continue
       pid="$(sed -n '1p' "$f" 2>/dev/null)"
       expiry="$(sed -n '2p' "$f" 2>/dev/null)"
-      if ! alive "$pid"; then
+      # PID 0 の arm (手動) はプロセスに紐付かず、期限だけで失効する
+      if [ "$pid" != 0 ] && ! alive "$pid"; then
         log "arm 失効 (プロセス終了): $(basename "$f")"
         rm -f "$f"
         continue
@@ -199,7 +203,9 @@ prune() {
       if [ -n "$expiry" ] && [ "$expiry" != "0" ] && [ "$t" -ge "$expiry" ]; then
         log "arm 失効 (期限切れ): $(basename "$f")"
         rm -f "$f"
+        continue
       fi
+      [ "$pid" = 0 ] && manual_arm=1
     done
   fi
 
@@ -207,6 +213,15 @@ prune() {
     for f in "$HOLD_DIR"/*; do
       [ -e "$f" ] || continue
       pid="$(sed -n '1p' "$f" 2>/dev/null)"
+      # PID 0 の hold (手動) は手動の arm に従う。arm が期限切れで消えたら一緒に消す。
+      # 残すと、自動モードの arm と組み合わさって、承認待ちでも起き続けてしまう
+      if [ "$pid" = 0 ]; then
+        if [ "$manual_arm" = 0 ]; then
+          log "hold 失効 (手動の有効化が終了): $(basename "$f")"
+          rm -f "$f"
+        fi
+        continue
+      fi
       if ! alive "$pid"; then
         log "hold 失効 (プロセス終了): $(basename "$f")"
         rm -f "$f"
