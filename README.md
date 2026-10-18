@@ -109,7 +109,7 @@ wakelock off                     # すぐに解除
 
 wakelock status                  # 現在の状態
 wakelock status --json           # 機械可読な状態（GUI がこれを読む）
-wakelock doctor                  # 前提条件の確認
+wakelock doctor                  # 前提条件と、外部による上書きの有無の確認
 
 wakelock run --for 3h -- npm run build   # hooks のないコマンドを包む
 wakelock run claude                      # 自動モードを使わず範囲を明示する
@@ -181,12 +181,28 @@ arm の作られ方は 3 通りある。
 * プロセスが死んだ arm / hold の削除
 * 期限切れ arm の失効
 * 望ましい状態の再計算と適用
+* 有効中は、これとは別に 2 秒ごとに `SleepDisabled` だけを見張る（下の「外部による上書き」）
 * arm が空になったら `disablesleep 0` にして自身も終了
 
 CLI やターミナルを強制終了しても、ガードが検知して解除する。
 
 なお `pmset -g` が何も返さなかった場合は `SleepDisabled=0` と混同せず「読み取れず」として扱う。
 0 と誤認すると、実際には変わっていないのに状態遷移をログに残してしまうため。
+
+### 外部による上書き
+
+他のアプリ（リモートデスクトップやスリープ管理のツールなど）が `pmset` で `SleepDisabled` を
+書き換えることがある。蓋を閉じた状態で 0 に戻されると、寝てしまうことがある。
+
+wakelock は最後に自分が整えた値を覚えておき、自分が変えていないのに値が違っていれば
+外部による上書きとして記録し、元に戻す。有効中は、ガードが 2 秒ごとに `SleepDisabled` だけを見張る
+（`WAKELOCK_GUARD_WATCH_INTERVAL`）。掃除と再計算は 20 秒ごとのまま。
+
+書き換えは `wakelock status` と `wakelock doctor` で確認できる。
+
+戻すまでの間に寝てしまう可能性は残る。設定が変わった瞬間に macOS が寝るかは未検証。
+根本的には、そのアプリのスリープ設定を見直すか、蓋閉じ運用中は終了する。
+StarDesk で約 10 分ごとに 0 に戻される例を確認している。
 
 ## 特権の扱い
 
@@ -320,7 +336,7 @@ make test       # デコードと表示ラベルの検証
 ### テスト
 
 ```sh
-./test/smoke.sh      # CLI の状態遷移（47 項目）
+./test/smoke.sh      # CLI の状態遷移（55 項目）
 make -C app test     # GUI のデコード 3 パターンと表示ラベル 10 項目
 node test/opencode-plugin.mjs   # opencode プラグイン（100 項目）
 ```
@@ -337,6 +353,7 @@ node test/opencode-plugin.mjs   # opencode プラグイン（100 項目）
 * 解除後も自動モードなら次の作業で arm が復活すること
 * `pmset` が読めないときも適用され、偽の状態遷移をログに残さないこと
 * 手動の有効化が期限切れになると hold も消え、自動モードのエージェントが承認待ちになったときに起き続けないこと
+* 外部からの書き換えを検出して戻し、通常の遷移は数えないこと、有効中は短い間隔で見張ること
 * run の arm がラベル一致で子孫でないプロセスからの `acquire` を受け付け、`--match-label` なしやラベル不一致では受け付けないこと
 
 `test/opencode-plugin.mjs` は `wakelock` をスタブに差し替え、偽の 2.0 API にイベントを流して

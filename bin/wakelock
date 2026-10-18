@@ -22,8 +22,14 @@ GUARD_PID="$STATE_DIR/guard.pid"
 LOG="$STATE_DIR/log"
 ENABLED_SINCE="$STATE_DIR/enabled_since"
 AUTO_FLAG="$STATE_DIR/auto"
+# 最後に自分が整えた SleepDisabled の値。外部による書き換えを見分けるのに使う
+APPLIED="$STATE_DIR/applied"
+# 外部による書き換えの記録。1 行に「時刻 自分の値 書き換えられた値」
+OVERRIDES="$STATE_DIR/overrides"
 
 GUARD_INTERVAL="${WAKELOCK_GUARD_INTERVAL:-20}"
+# 有効中に SleepDisabled だけを見張る間隔 (秒、整数)。GUARD_INTERVAL 以上なら見張らない
+GUARD_WATCH_INTERVAL="${WAKELOCK_GUARD_WATCH_INTERVAL:-2}"
 DEFAULT_ON_DURATION="${WAKELOCK_DEFAULT_DURATION:-2h}"
 
 SELF="$0"
@@ -132,12 +138,37 @@ record_enabled_since() {
   fi
 }
 
+# 外部 (他のアプリや手作業の pmset) による書き換えを、通常の状態遷移と区別して記録する。
+# 他のアプリが定期的に書き換えていると、蓋を閉じたまま寝てしまうため、気付けるようにする。
+record_override() {
+  local mine="$1" theirs="$2"
+  log "外部による上書きを検出: SleepDisabled が $mine から $theirs に書き換えられていたため $mine に戻します"
+  printf '%s %s %s\n' "$(now)" "$mine" "$theirs" >>"$OVERRIDES"
+  # 記録が際限なく増えないよう、直近の分だけ残す
+  if [ "$(wc -l <"$OVERRIDES")" -gt 200 ]; then
+    tail -n 100 "$OVERRIDES" >"$OVERRIDES.tmp" && mv "$OVERRIDES.tmp" "$OVERRIDES"
+  fi
+}
+
+# 指定した時刻以降の、外部による書き換えの回数
+override_count_since() {
+  [ -f "$OVERRIDES" ] || { echo 0; return; }
+  /usr/bin/awk -v since="$1" '$1 >= since { n++ } END { print n + 0 }' "$OVERRIDES"
+}
+
 apply_disablesleep() {
-  local want="$1" cur
+  local want="$1" cur overridden=0
   cur="$(current_disablesleep)"
   if [ "$cur" = "$want" ]; then
     record_enabled_since "$want"
+    echo "$want" >"$APPLIED"
     return 0
+  fi
+
+  # 最後に整えた値のまま変えていないのに違っていれば、外部による上書き
+  if [ "$cur" != unknown ] && [ "$(cat "$APPLIED" 2>/dev/null)" = "$want" ]; then
+    overridden=1
+    record_override "$want" "$cur"
   fi
 
   if [ ! -x "$HELPER" ]; then
@@ -145,12 +176,15 @@ apply_disablesleep() {
     return 1
   fi
   if $SUDO "$HELPER" "$want" >/dev/null 2>&1; then
-    if [ "$cur" = unknown ]; then
+    if [ "$overridden" = 1 ]; then
+      :  # 上書きとして記録済み
+    elif [ "$cur" = unknown ]; then
       log "SleepDisabled を $want に設定しました (適用前の値は読み取れず)"
     else
       log "SleepDisabled $cur -> $want"
     fi
     record_enabled_since "$want"
+    echo "$want" >"$APPLIED"
     return 0
   fi
   log "helper の実行に失敗しました (want=$want)"
@@ -230,7 +264,9 @@ prune() {
   fi
 }
 
-# arm と hold が両方あるときだけスリープを無効化する
+# arm と hold が両方あるときだけスリープを無効化する。
+# 求めた値は RECONCILED に残す (ガードが見張るかどうかの判断に使う)
+RECONCILED=0
 reconcile() {
   prune
   local arms holds want
@@ -241,6 +277,7 @@ reconcile() {
   else
     want=0
   fi
+  RECONCILED="$want"
   apply_disablesleep "$want"
 }
 
@@ -256,13 +293,30 @@ ensure_guard() {
 }
 
 cmd_guard() {
-  log "ガード開始 interval=${GUARD_INTERVAL}s"
+  log "ガード開始 interval=${GUARD_INTERVAL}s watch=${GUARD_WATCH_INTERVAL}s"
+  local arms waited=0
+  # 起動直後から見張れるよう、今の望ましい状態だけを読む。
+  # ガードを起動する側はロックを持ったまま起動し、適用も済ませているので、ここでは
+  # ロックを取らない。取ると、起動した側の処理が長引いたときにロック待ちで諦めて終わってしまう
+  if [ "$(count_dir "$ARM_DIR")" -gt 0 ] && [ "$(count_dir "$HOLD_DIR")" -gt 0 ]; then
+    RECONCILED=1
+  fi
   while :; do
-    sleep "$GUARD_INTERVAL"
+    # 有効中は短い間隔で SleepDisabled だけを見張り、外部からの上書きをすぐ戻す。
+    # 掃除と再計算は通常の間隔で行う。見張りで起こすプロセスを pmset だけに抑えるため
+    if [ "$RECONCILED" = 1 ] && [ "$GUARD_WATCH_INTERVAL" -lt "$GUARD_INTERVAL" ]; then
+      sleep "$GUARD_WATCH_INTERVAL"
+      waited=$((waited + GUARD_WATCH_INTERVAL))
+      if [ "$waited" -lt "$GUARD_INTERVAL" ] && [ "$(current_disablesleep)" = 1 ]; then
+        continue
+      fi
+    else
+      sleep "$GUARD_INTERVAL"
+    fi
+    waited=0
     lock
     prune
     reconcile
-    local arms
     arms="$(count_dir "$ARM_DIR")"
     unlock
     trap - EXIT INT TERM
@@ -492,12 +546,21 @@ status_json() {
   local auto="false"
   [ -f "$AUTO_FLAG" ] && auto="true"
 
+  local ov_last="" ov_hour
+  [ -f "$OVERRIDES" ] && ov_last="$(tail -n 1 "$OVERRIDES" | cut -d' ' -f1)"
+  ov_hour="$(override_count_since $((t - 3600)))"
+
   /usr/bin/jq -n \
     --argjson auto "$auto" \
     --arg sd "${sd:-0}" --arg guard "$guard" --arg since "$since" --arg now "$t" \
+    --arg ovlast "$ov_last" --arg ovhour "$ov_hour" \
     --argjson arms "${arms:-[]}" --argjson holds "${holds:-[]}" '
     {
       auto: $auto,
+      overrides: {
+        last: (if $ovlast == "" then null else ($ovlast | tonumber) end),
+        lastHour: ($ovhour | tonumber)
+      },
       sleepDisabled: ($sd | tonumber),
       guard: {
         running: ($guard != ""),
@@ -528,6 +591,12 @@ cmd_status() {
     printf 'ガード        : 稼働中 (pid %s)\n' "$guard"
   else
     printf 'ガード        : 停止中\n'
+  fi
+  local ov_hour
+  ov_hour="$(override_count_since $(( $(now) - 3600 )))"
+  if [ "$ov_hour" -gt 0 ]; then
+    printf '外部の上書き  : 直近 1 時間に %s 回 (最終 %s)  wakelock doctor を参照\n' \
+      "$ov_hour" "$(date -r "$(tail -n 1 "$OVERRIDES" | cut -d' ' -f1)" '+%H:%M:%S')"
   fi
 
   printf '\narm (蓋閉じ運用の意思表示):\n'
@@ -683,6 +752,19 @@ cmd_doctor() {
     printf '  [OK]   状態ディレクトリに書き込めます: %s\n' "$STATE_DIR"
   else
     printf '  [NG]   状態ディレクトリに書き込めません: %s\n' "$STATE_DIR"; ok=1
+  fi
+
+  # 前提条件ではないので ok は変えない。気付けるように警告だけ出す
+  local ov_day
+  ov_day="$(override_count_since $(( $(now) - 86400 )))"
+  if [ "$ov_day" -gt 0 ]; then
+    printf '  [警告] 直近 24 時間に %s 回、外部から SleepDisabled が書き換えられました (最終 %s)\n' \
+      "$ov_day" "$(date -r "$(tail -n 1 "$OVERRIDES" | cut -d' ' -f1)" '+%m/%d %H:%M:%S')"
+    printf '         リモートデスクトップやスリープ管理のアプリが pmset で設定を書き換えている可能性があります。\n'
+    printf '         書き換えられると、蓋を閉じたまま寝てしまうことがあります。\n'
+    printf '         そのアプリのスリープ設定を見直すか、蓋閉じ運用中は終了してください。\n'
+  else
+    printf '  [OK]   外部による SleepDisabled の書き換えはありません (直近 24 時間)\n'
   fi
 
   printf '\n現在のスリープ設定 (承認待ちで放置したときの猶予):\n'

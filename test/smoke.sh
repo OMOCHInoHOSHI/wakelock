@@ -305,5 +305,78 @@ check 1 "手動の arm が生きている間は有効のまま"
 "$WL" off >/dev/null 2>&1
 
 echo
+echo "17. 外部からの SleepDisabled の上書きを検出して戻し、有効中は短い間隔で見張る"
+"$WL" auto off >/dev/null 2>&1
+"$WL" off >/dev/null 2>&1
+rm -f "$WAKELOCK_STATE_DIR/overrides"
+: >"$WAKELOCK_STATE_DIR/log"
+echo 0 >"$SLEEP_STATE"
+
+# ガードの終了を条件待ちする
+wait_guard_gone() {
+  local i=0
+  while [ -f "$WAKELOCK_STATE_DIR/guard.pid" ] && [ "$i" -lt 150 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+}
+
+# 通常の遷移は上書きに数えない
+"$WL" on 10m >/dev/null 2>&1
+"$WL" off >/dev/null 2>&1
+"$WL" on 10m >/dev/null 2>&1
+got="$("$WL" status --json 2>/dev/null | jq -c '[.overrides.lastHour, .overrides.last]')"
+if [ "$got" = "[0,null]" ]; then
+  printf '  \033[32mPASS\033[0m  通常の遷移は上書きに数えない (%s)\n' "$got"; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  通常の遷移が上書きに数えられた (期待 [0,null] / 実際 %s)\n' "$got"; FAIL=$((FAIL + 1))
+fi
+
+# 外部から 0 に戻されると検出して戻す
+echo 0 >"$SLEEP_STATE"
+wait_for 1 5
+check 1 "外部から 0 にされても 1 に戻される"
+n="$(grep -c "外部による上書きを検出" "$WAKELOCK_STATE_DIR/log" 2>/dev/null)"
+if [ "$n" = "1" ]; then
+  printf '  \033[32mPASS\033[0m  ログに上書きの検出が 1 行ある\n'; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  ログの検出行 (期待 1 / 実際 %s)\n' "$n"; FAIL=$((FAIL + 1))
+fi
+got="$("$WL" status --json 2>/dev/null | jq -r '.overrides.lastHour')"
+if [ "$got" = "1" ]; then
+  printf '  \033[32mPASS\033[0m  status --json の lastHour が 1\n'; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  lastHour (期待 1 / 実際 %s)\n' "$got"; FAIL=$((FAIL + 1))
+fi
+out="$("$WL" status 2>/dev/null)"
+if printf '%s' "$out" | grep -q "外部の上書き"; then
+  printf '  \033[32mPASS\033[0m  status に「外部の上書き」が出る\n'; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  status に「外部の上書き」が出ない\n'; FAIL=$((FAIL + 1))
+fi
+out="$("$WL" doctor 2>&1)"
+if printf '%s' "$out" | grep -q "\[警告\]"; then
+  printf '  \033[32mPASS\033[0m  doctor が警告を出す\n'; PASS=$((PASS + 1))
+else
+  printf '  \033[31mFAIL\033[0m  doctor が警告を出さない\n'; FAIL=$((FAIL + 1))
+fi
+
+# 有効中は短い間隔で見張る
+"$WL" off >/dev/null 2>&1
+wait_guard_gone
+WAKELOCK_GUARD_INTERVAL=6 WAKELOCK_GUARD_WATCH_INTERVAL=1 "$WL" on 10m >/dev/null 2>&1
+sleep 1.5
+echo 0 >"$SLEEP_STATE"
+wait_for 1 3
+check 1 "通常の間隔 (6 秒) より短い 3 秒以内に戻される"
+"$WL" off >/dev/null 2>&1
+wait_guard_gone
+if [ -f "$WAKELOCK_STATE_DIR/guard.pid" ]; then
+  printf '  \033[31mFAIL\033[0m  ガードが終了していない\n'; FAIL=$((FAIL + 1))
+else
+  printf '  \033[32mPASS\033[0m  ガードが終了している\n'; PASS=$((PASS + 1))
+fi
+
+echo
 printf '結果: \033[32m%d PASS\033[0m / \033[31m%d FAIL\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
