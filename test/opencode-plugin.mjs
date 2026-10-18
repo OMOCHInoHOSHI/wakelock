@@ -9,15 +9,20 @@ import path from "node:path"
 const WORK = fs.mkdtempSync(path.join(os.tmpdir(), "wakelock-opencode-test-"))
 const LOG = path.join(WORK, "calls.log")
 const FAIL_ONCE = path.join(WORK, "release_fail_once")
+const DELAY_ACQUIRE = path.join(WORK, "acquire_delay")
 const STUB = path.join(WORK, "wakelock")
 
 const cleanup = () => fs.rmSync(WORK, { recursive: true, force: true })
 process.on("exit", cleanup)
 
-// 引数を 1 行ずつ記録する。FAIL_ONCE があれば release のときだけ 1 回失敗する
+// 引数を 1 行ずつ記録する。FAIL_ONCE があれば release のときだけ 1 回失敗する。
+// DELAY_ACQUIRE があれば acquire のときだけ、sleep の後に記録する (完了順をログに出すため)
 fs.writeFileSync(
   STUB,
   `#!/usr/bin/env bash
+if [ "\${1:-}" = "acquire" ] && [ -f "${DELAY_ACQUIRE}" ]; then
+  sleep 3.5
+fi
 echo "$*" >>"${LOG}"
 if [ "\${1:-}" = "release" ] && [ -f "${FAIL_ONCE}" ]; then
   rm -f "${FAIL_ONCE}"
@@ -95,7 +100,7 @@ function makeApi(opts) {
   const api = {
     event: {
       subscribe({ signal } = {}) {
-        if (signal) {
+        if (signal && !opts?.ignoreAbort) {
           if (signal.aborted) finish()
           else signal.addEventListener("abort", finish, { once: true })
         }
@@ -122,6 +127,7 @@ function makeApi(opts) {
     api.session = {
       async get({ sessionID }) {
         getCalls += 1
+        if (opts.delayGet) await sleep(opts.delayGet)
         if (getCalls <= (opts.failFirst ?? 0)) throw new Error("get failed")
         if ((opts.failGet ?? []).includes(sessionID)) throw new Error("get failed")
         return opts.sessions?.[sessionID] ?? {}
@@ -547,6 +553,80 @@ await case20(
   },
   { sessions: { C: {} } },
 )
+
+// ------------------------------------------------------------------
+heading("破棄と処理中の acquire の行き違い")
+{
+  clearLog()
+  const m = makeApi()
+  const dispose = await plugin.setup(m.api)
+  fs.writeFileSync(DELAY_ACQUIRE, "")
+  m.push(ev("session.execution.started", { sessionID: "P" }))
+  await sleep(300)
+  const t0 = Date.now()
+  await dispose()
+  const took = Date.now() - t0
+  fs.rmSync(DELAY_ACQUIRE, { force: true })
+  report(took >= 2500 && took < 5000, "後片付けが 3 秒強で返る", "2.5〜5 秒", `${took}ms`)
+  await sleep(5000)
+  const got = readLog()
+  const iAcq = got.indexOf(acq2("P"))
+  report(
+    got.length === 3 && got[0] === rel("P") && iAcq === 1 && got[2] === rel("P"),
+    "ログが release, acquire, release の順",
+    JSON.stringify([rel("P"), acq2("P"), rel("P")]),
+    JSON.stringify(got),
+  )
+  clearLog()
+}
+
+// ------------------------------------------------------------------
+heading("問い合わせ中の破棄では hold を取らない")
+{
+  clearLog()
+  const m = makeApi({ delayGet: 2000 })
+  const dispose = await plugin.setup(m.api)
+  m.push(ev("session.execution.started", { sessionID: "C" }))
+  await sleep(300)
+  await dispose()
+  await sleep(2500)
+  await expectCalls("get が戻った後も acquire が出ない", [])
+  clearLog()
+}
+
+// ------------------------------------------------------------------
+heading("abort に応じない購読でも、破棄の後のイベントでは何もしない")
+{
+  clearLog()
+  const m = makeApi({ ignoreAbort: true })
+  const dispose = await plugin.setup(m.api)
+  m.push(ev("session.execution.started", { sessionID: "P" }))
+  await expectCalls("P の started で acquire", [acq2("P")])
+  clearLog()
+  await dispose()
+  await expectCalls("破棄で release", [rel("P")])
+  clearLog()
+  m.push(ev("session.execution.started", { sessionID: "P" }))
+  m.push(ev("session.step.started", { sessionID: "P" }))
+  await expectCalls("破棄の後の started / step.started では何も呼ばない", [])
+  m.end()
+  clearLog()
+}
+
+// ------------------------------------------------------------------
+heading("削除済みセッションへの遅れたイベントは無視する")
+await case20(async ({ push }) => {
+  push(ev("session.execution.started", { sessionID: "P" }))
+  await expectCalls("P の started で acquire", [acq2("P")])
+  clearLog()
+  push(ev("session.deleted", { sessionID: "P" }))
+  await expectCalls("P の deleted で release", [rel("P")])
+  clearLog()
+  push(ev("session.step.started", { sessionID: "P" }))
+  push(ev("session.execution.started", { sessionID: "P" }))
+  push(ev("permission.asked", { sessionID: "P", id: "per1" }))
+  await expectCalls("遅れた step.started / started / asked では何も呼ばない", [])
+})
 
 // ------------------------------------------------------------------
 heading("release の再試行")

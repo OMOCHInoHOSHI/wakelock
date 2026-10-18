@@ -129,6 +129,10 @@ const setup = async (api) => {
   const parents = new Map()
   /** acquire 済みのルートの sessionID */
   const held = new Set()
+  /** 削除済みのセッション。遅れて届いたイベントで実行中に戻さない */
+  const deleted = new Set()
+  /** 破棄 (再読み込み・終了) された後は、新たに hold を取らない */
+  let disposed = false
 
   const state = (sessionID) => {
     let s = sessions.get(sessionID)
@@ -187,6 +191,7 @@ const setup = async (api) => {
    * refresh は root を、状態が変わらなくても acquire し直す (CLI 側は同内容なら即返す)。
    */
   const sync = async (root, { refresh = false } = {}) => {
+    if (disposed) return
     const wanted = new Set()
     for (const [id, s] of sessions) if (working(id, s)) wanted.add(rootOf(id))
 
@@ -194,6 +199,9 @@ const setup = async (api) => {
       if (held.has(r) && !(refresh && r === root)) continue
       held.add(r)
       await acquireWork(r)
+      // 破棄と行き違った acquire は、破棄側の release より後に hold を書いたかもしれない。
+      // CLI のロックの取り合い次第で順序は決まらないので、ここで取り直して手放す
+      if (disposed) return release(r)
     }
     for (const r of [...held]) {
       if (wanted.has(r)) continue
@@ -203,9 +211,11 @@ const setup = async (api) => {
   }
 
   const handle = async (event) => {
+    // 購読が abort に応じず、破棄の後にもイベントが届く場合に備える
+    if (disposed) return
     const data = event?.data
     const sessionID = data?.sessionID
-    if (!sessionID) return
+    if (!sessionID || deleted.has(sessionID)) return
 
     /** 親子関係を覚えるだけで、hold は動かさない */
     if (event.type === "session.created") {
@@ -215,6 +225,8 @@ const setup = async (api) => {
     if (!TRACKED.has(event.type)) return
 
     await resolveParents(sessionID)
+    // 問い合わせを待つ間に破棄されていたら、状態を作り直さない
+    if (disposed) return
     const root = rootOf(sessionID)
     const s = state(sessionID)
     switch (event.type) {
@@ -246,7 +258,10 @@ const setup = async (api) => {
       default:
         s.executing = false
         s.pending.clear()
-        if (event.type === "session.deleted") parents.delete(sessionID)
+        if (event.type === "session.deleted") {
+          parents.delete(sessionID)
+          deleted.add(sessionID)
+        }
     }
     if (!s.executing && s.pending.size === 0) sessions.delete(sessionID)
     return sync(root, { refresh: event.type === "session.step.started" })
@@ -278,8 +293,11 @@ const setup = async (api) => {
    * opencode はこれを待つので、購読が止まらなくても長くは待たせない。
    */
   return async () => {
+    disposed = true
     abort.abort()
-    await Promise.race([loop, new Promise((resolve) => setTimeout(resolve, 3000))])
+    let timer
+    await Promise.race([loop, new Promise((resolve) => (timer = setTimeout(resolve, 3000)))])
+    clearTimeout(timer)
     await releaseAll()
   }
 }
