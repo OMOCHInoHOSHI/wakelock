@@ -4,6 +4,7 @@ Mac の蓋を閉じたまま Claude Code / opencode を走らせるためのス�
 
 エージェントが作業している間だけスリープを無効化し、承認待ちで放置されたら
 通常のスリープ設定に戻す。メニューバーアプリから状態の確認と操作ができる。
+opencode は 1.x と 2.0 の両方に対応している。
 
 ## インストール
 
@@ -18,6 +19,7 @@ Mac の蓋を閉じたまま Claude Code / opencode を走らせるためのス�
 1. `/usr/local/libexec/wakelock-helper` と `/etc/sudoers.d/wakelock`（要パスワード）
 2. `/opt/homebrew/bin/wakelock` へのシンボリックリンク
 3. `~/.config/opencode/plugin/wakelock.js` へのシンボリックリンク
+   （2.0 も同じ場所を読む。`plugins/`（複数形）にも置くと 2.0 では重複 ID のエラーになるため、単数形だけに置く）
 4. `~/.claude/settings.json` への hooks 追記（既存設定は保持。再実行しても重複しない）
 5. `/Applications/Wakelock.app`（メニューバーアプリ）
 
@@ -216,6 +218,15 @@ hooks とプラグインは `wakelock hook acquire` / `release` を呼ぶだけ�
 
 ### opencode
 
+1 つのファイルで 1.x と 2.0 の両方に対応している。default export は `{ id, setup, server }` で、
+1.x は `server` を使い、`setup` には event のない API を渡す（`setup` は何もせず戻る）。
+2.0 は `server` を無視し、`setup` だけを使う。
+
+動作確認済みのバージョンは 2.0.32 / 1.19.3 / 1.18.27。1.17.15 は読み込みと開始・終了までを確認した
+（opencode の無料モデルが 1.18 以上でしか使えず、承認待ちは確かめられていない）。
+
+#### 1.x
+
 | フック | 動作 |
 |---|---|
 | `chat.message` | acquire（ターン開始） |
@@ -227,6 +238,34 @@ hooks とプラグインは `wakelock hook acquire` / `release` を呼ぶだけ�
 opencode には `permission.replied` があるため、承認後の再開をツール呼び出しごとの
 監視なしに検知できる。Claude Code には該当するものがないので `PostToolUse` で代用しており、
 hold が既に同じ内容なら `pmset` を叩かずに返す高速パスを入れてある。
+
+#### 2.0
+
+| イベント | 動作 |
+|---|---|
+| `session.execution.started` | acquire（作業開始） |
+| `session.step.started` | acquire（取り直し。再読み込みで開始を取り逃しても追い付き、後から arm された場合にも効く） |
+| `permission.asked` | release（承認待ち） |
+| `permission.replied` | 承認待ちがすべて返ったら acquire（承認後の再開） |
+| `session.execution.succeeded` / `failed` / `interrupted` | release（応答完了・失敗・中断） |
+| `session.deleted` | release（保険） |
+| プラグインの破棄（再読み込み・終了） | 取った hold をすべて release |
+
+承認待ちは requestID ごとに数える。並列のツール呼び出しで承認が複数出たとき、
+最初の応答だけで起きてしまわないようにするため。
+
+2.0 のプロセスモデルと挙動の違い:
+
+* プラグインは TUI ではなく常駐サービス（`opencode serve --service`、親は launchd）で動き、
+  hold はサービスの PID に紐づく。`--standalone` のときはサーバーが CLI の子プロセスになるので、1.x と同じ扱いになる。
+* TUI を閉じても作業はサービスで続くので、作業が終わるまでは有効のまま。終われば解除される。
+* 自動モードの arm（`auto-<pid>`）もサービスの PID に紐づく。サービスが動いている間は、
+  メニューの「蓋閉じ運用中」に opencode が残り、ガードも常駐する。
+  スリープするかどうかは hold で決まるので、実害はない。
+* 解除を取りこぼしたときの保険が弱い。1.x は TUI の終了で hold が消えたが、2.0 はサービスが終わるまで残る。
+  そのため release の再試行、ステップごとの取り直し、破棄時の一括 release を入れてある。
+* 2.0 はプラグインのファイルを監視していて、変更すると自動で読み直す。
+  シンボリックリンク先のリポジトリを編集すると、動いているサービスにそのまま反映される。
 
 ## 開発
 
@@ -252,6 +291,7 @@ make test       # デコードと表示ラベルの検証
 ```sh
 ./test/smoke.sh      # CLI の状態遷移（31 項目）
 make -C app test     # GUI のデコード 3 パターンと表示ラベル 10 項目
+node test/opencode-plugin.mjs   # opencode プラグイン（44 項目）
 ```
 
 `test/smoke.sh` は `pmset` と sudo helper をスタブに差し替え、
@@ -265,6 +305,20 @@ make -C app test     # GUI のデコード 3 パターンと表示ラベル 10 �
 * 無期限が期限で失効しないこと
 * 解除後も自動モードなら次の作業で arm が復活すること
 * `pmset` が読めないときも適用され、偽の状態遷移をログに残さないこと
+
+`test/opencode-plugin.mjs` は `wakelock` をスタブに差し替え、偽の 2.0 API にイベントを流して
+呼び出し引数を検証する。確認している内容:
+
+* default export の形（`id` / `setup` / `server`）
+* 1.x のフックが acquire / release を正しく呼び、sessionID がなければ何も呼ばないこと
+* 1.x が渡す event のない API では `setup` が何もしないこと
+* 2.0 の開始・承認待ち・再開・完了の流れ（拒否でも再開すること）
+* 並列の承認が全部返るまで復帰しないこと
+* `session.step.started` による取り直しと、承認待ち中は取り直さないこと
+* 失敗・中断・セッション削除での解除
+* 関係ないイベントや実行中でないセッションを無視すること
+* 破棄時と購読の終了時に、保持中の hold をすべて解除すること
+* release が失敗したとき 1 回だけ再試行すること
 
 ## 注意
 
