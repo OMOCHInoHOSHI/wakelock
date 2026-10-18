@@ -35,9 +35,9 @@ function wakelock(...args) {
 
 const holdID = (sessionID) => `opencode-${sessionID}`
 
-const acquire = (sessionID) =>
+const acquire = (sessionID, ...extra) =>
   sessionID
-    ? wakelock("acquire", holdID(sessionID), "--pid", String(process.pid), "--label", "opencode")
+    ? wakelock("acquire", holdID(sessionID), "--pid", String(process.pid), "--label", "opencode", ...extra)
     : Promise.resolve()
 
 /**
@@ -96,6 +96,12 @@ const setup = async (api) => {
   // 1.x も setup を呼ぶが event を渡さない。そちらは server 側が処理する
   if (typeof api?.event?.subscribe !== "function") return
 
+  /**
+   * サービスは `wakelock run opencode` で包んだ TUI の子孫にならないため、
+   * 祖先の照合では run の arm に届かない。ラベルの一致でも照合させる。
+   */
+  const acquireWork = (sessionID) => acquire(sessionID, "--match-label")
+
   /** sessionID -> { executing, pending: 応答待ちの承認 requestID } */
   const sessions = new Map()
   /** acquire 済みの sessionID */
@@ -120,7 +126,7 @@ const setup = async (api) => {
 
     if (want && (refresh || !held.has(sessionID))) {
       held.add(sessionID)
-      await acquire(sessionID)
+      await acquireWork(sessionID)
     } else if (!want && held.has(sessionID)) {
       held.delete(sessionID)
       await release(sessionID)

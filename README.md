@@ -122,6 +122,8 @@ wakelock run claude                      # 自動モードを使わず範囲を�
 （作業中だけ有効）、それ以外は `--always`（実行中ずっと有効）。
 `--hooked` / `--always` で明示的に上書きできる。
 
+opencode 2.0 でも `wakelock run opencode` は効く。仕組みは「アダプタ > opencode > 2.0」を参照。
+
 ## 解決したい問題
 
 `caffeinate` はアイドルスリープしか止められない。蓋を閉じるとハードウェア起因でスリープに入るため、
@@ -259,6 +261,10 @@ hold が既に同じ内容なら `pmset` を叩かずに返す高速パスを入
 * プラグインは TUI ではなく常駐サービス（`opencode serve --service`、親は launchd）で動き、
   hold はサービスの PID に紐づく。`--standalone` のときはサーバーが CLI の子プロセスになるので、1.x と同じ扱いになる。
 * TUI を閉じても作業はサービスで続くので、作業が終わるまでは有効のまま。終われば解除される。
+* サービスは `wakelock run opencode` のラッパーの子孫にならないので、2.0 の acquire は `--match-label` を付ける。
+  祖先で arm が見つからなければ、ラベルが一致して本体が生きている run の arm でも照合する。
+  対象は run の arm だけで、自動モードや手動の arm、Claude Code の hooks の挙動は変わらない。
+  同じサービスにつながる別の opencode の作業も、その run が生きている間は対象になる。
 * 自動モードの arm（`auto-<pid>`）もサービスの PID に紐づく。サービスが動いている間は、
   メニューの「蓋閉じ運用中」に opencode が残り、ガードも常駐する。
   スリープするかどうかは hold で決まるので、実害はない。
@@ -289,9 +295,9 @@ make test       # デコードと表示ラベルの検証
 ### テスト
 
 ```sh
-./test/smoke.sh      # CLI の状態遷移（31 項目）
+./test/smoke.sh      # CLI の状態遷移（38 項目）
 make -C app test     # GUI のデコード 3 パターンと表示ラベル 10 項目
-node test/opencode-plugin.mjs   # opencode プラグイン（44 項目）
+node test/opencode-plugin.mjs   # opencode プラグイン（46 項目）
 ```
 
 `test/smoke.sh` は `pmset` と sudo helper をスタブに差し替え、
@@ -305,6 +311,7 @@ node test/opencode-plugin.mjs   # opencode プラグイン（44 項目）
 * 無期限が期限で失効しないこと
 * 解除後も自動モードなら次の作業で arm が復活すること
 * `pmset` が読めないときも適用され、偽の状態遷移をログに残さないこと
+* run の arm がラベル一致で子孫でないプロセスからの `acquire` を受け付け、`--match-label` なしやラベル不一致では受け付けないこと
 
 `test/opencode-plugin.mjs` は `wakelock` をスタブに差し替え、偽の 2.0 API にイベントを流して
 呼び出し引数を検証する。確認している内容:
@@ -319,6 +326,7 @@ node test/opencode-plugin.mjs   # opencode プラグイン（44 項目）
 * 関係ないイベントや実行中でないセッションを無視すること
 * 破棄時と購読の終了時に、保持中の hold をすべて解除すること
 * release が失敗したとき 1 回だけ再試行すること
+* `--match-label` が 2.0 経路の acquire にだけ付くこと
 
 ## 注意
 

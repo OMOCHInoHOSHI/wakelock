@@ -62,6 +62,8 @@ const readLog = () =>
 const clearLog = () => fs.writeFileSync(LOG, "")
 
 const acq = (sid) => `acquire opencode-${sid} --pid ${process.pid} --label opencode`
+/** 2.0 経路の acquire は --match-label が付く */
+const acq2 = (sid) => `${acq(sid)} --match-label`
 const rel = (sid) => `release opencode-${sid}`
 
 /** 期待行数に達するまで最大 3 秒待ち、さらに 200ms 待って余計な呼び出しがないことを確かめる */
@@ -183,16 +185,30 @@ heading("1.x が渡す限定 API での setup")
 }
 
 // ------------------------------------------------------------------
+heading("--match-label は 2.0 経路だけに付く")
+{
+  clearLog()
+  const hooks = await plugin.server()
+  await hooks["chat.message"]({ sessionID: "s1" })
+  await expectCalls("1.x の acquire には付かない", [acq("s1")])
+  clearLog()
+  await case20(async ({ push }) => {
+    push(ev("session.execution.started", { sessionID: "s1" }))
+    await expectCalls("2.0 の acquire には付く", [`${acq("s1")} --match-label`])
+  })
+}
+
+// ------------------------------------------------------------------
 heading("2.0 の基本の流れ")
 await case20(async ({ push }) => {
   push(ev("session.execution.started", { sessionID: "s1" }))
-  await expectCalls("started で acquire", [acq("s1")])
+  await expectCalls("started で acquire", [acq2("s1")])
   clearLog()
   push(ev("permission.asked", { sessionID: "s1", id: "per1" }))
   await expectCalls("asked で release", [rel("s1")])
   clearLog()
   push(ev("permission.replied", { sessionID: "s1", requestID: "per1", reply: "once" }))
-  await expectCalls("replied で acquire", [acq("s1")])
+  await expectCalls("replied で acquire", [acq2("s1")])
   clearLog()
   push(ev("session.execution.succeeded", { sessionID: "s1" }))
   await expectCalls("succeeded で release", [rel("s1")])
@@ -202,7 +218,7 @@ await case20(async ({ push }) => {
 heading("2.0 の並列承認")
 await case20(async ({ push }) => {
   push(ev("session.execution.started", { sessionID: "s1" }))
-  await expectCalls("started で acquire", [acq("s1")])
+  await expectCalls("started で acquire", [acq2("s1")])
   clearLog()
   push(ev("permission.asked", { sessionID: "s1", id: "per1" }))
   await expectCalls("asked per1 で release", [rel("s1")])
@@ -212,7 +228,7 @@ await case20(async ({ push }) => {
   push(ev("permission.replied", { sessionID: "s1", requestID: "per1", reply: "once" }))
   await expectCalls("replied per1 でも何も呼ばない", [])
   push(ev("permission.replied", { sessionID: "s1", requestID: "per2", reply: "once" }))
-  await expectCalls("replied per2 で acquire", [acq("s1")])
+  await expectCalls("replied per2 で acquire", [acq2("s1")])
   clearLog()
   push(ev("session.execution.succeeded", { sessionID: "s1" }))
   await expectCalls("succeeded で release", [rel("s1")])
@@ -222,10 +238,10 @@ await case20(async ({ push }) => {
 heading("2.0 の session.step.started")
 await case20(async ({ push }) => {
   push(ev("session.execution.started", { sessionID: "s1" }))
-  await expectCalls("started で acquire", [acq("s1")])
+  await expectCalls("started で acquire", [acq2("s1")])
   clearLog()
   push(ev("session.step.started", { sessionID: "s1", assistantMessageID: "msg1" }))
-  await expectCalls("step.started で再度 acquire (取り直し)", [acq("s1")])
+  await expectCalls("step.started で再度 acquire (取り直し)", [acq2("s1")])
   clearLog()
   push(ev("permission.asked", { sessionID: "s1", id: "per1" }))
   await expectCalls("asked で release", [rel("s1")])
@@ -235,7 +251,7 @@ await case20(async ({ push }) => {
 })
 await case20(async ({ push }) => {
   push(ev("session.step.started", { sessionID: "s2", assistantMessageID: "msg1" }))
-  await expectCalls("started 未受信のセッションでも step.started で acquire", [acq("s2")])
+  await expectCalls("started 未受信のセッションでも step.started で acquire", [acq2("s2")])
 })
 
 // ------------------------------------------------------------------
@@ -243,7 +259,7 @@ heading("2.0 の終了系イベント")
 for (const type of ["session.execution.failed", "session.execution.interrupted", "session.deleted"]) {
   await case20(async ({ push }) => {
     push(ev("session.execution.started", { sessionID: "s1" }))
-    await expectCalls(`started で acquire (${type} 用)`, [acq("s1")])
+    await expectCalls(`started で acquire (${type} 用)`, [acq2("s1")])
     clearLog()
     push(ev(type, { sessionID: "s1" }))
     await expectCalls(`${type} で release`, [rel("s1")])
@@ -254,13 +270,13 @@ for (const type of ["session.execution.failed", "session.execution.interrupted",
 heading("2.0 で reply が reject")
 await case20(async ({ push }) => {
   push(ev("session.execution.started", { sessionID: "s1" }))
-  await expectCalls("started で acquire", [acq("s1")])
+  await expectCalls("started で acquire", [acq2("s1")])
   clearLog()
   push(ev("permission.asked", { sessionID: "s1", id: "per1" }))
   await expectCalls("asked で release", [rel("s1")])
   clearLog()
   push(ev("permission.replied", { sessionID: "s1", requestID: "per1", reply: "reject" }))
-  await expectCalls("reject でも acquire (作業は続く)", [acq("s1")])
+  await expectCalls("reject でも acquire (作業は続く)", [acq2("s1")])
 })
 
 // ------------------------------------------------------------------
@@ -284,7 +300,7 @@ heading("2.0 の破棄")
   const dispose = await plugin.setup(m.api)
   m.push(ev("session.execution.started", { sessionID: "s1" }))
   m.push(ev("session.execution.started", { sessionID: "s2" }))
-  await expectCalls("s1 と s2 の acquire", [acq("s1"), acq("s2")], { sorted: true })
+  await expectCalls("s1 と s2 の acquire", [acq2("s1"), acq2("s2")], { sorted: true })
   clearLog()
   await dispose()
   await expectCalls("後片付けで両方 release", [rel("s1"), rel("s2")], { sorted: true })
@@ -301,7 +317,7 @@ heading("2.0 で購読が abort なしに終わる")
   const m = makeApi()
   const dispose = await plugin.setup(m.api)
   m.push(ev("session.execution.started", { sessionID: "s1" }))
-  await expectCalls("started で acquire", [acq("s1")])
+  await expectCalls("started で acquire", [acq2("s1")])
   clearLog()
   m.end()
   await expectCalls("end() で保持中の hold を release", [rel("s1")])

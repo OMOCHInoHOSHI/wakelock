@@ -302,6 +302,22 @@ armed_for() {
   return 1
 }
 
+# run が張った arm のうち、ラベルが一致し本体が生きているものがあるかを判定する。
+# opencode 2.0 は作業を常駐サービスが持ち、そのサービスは run で包んだ TUI の子孫にならない。
+# 祖先の照合では run の arm に届かないので、--match-label が付いた acquire に限りこちらで照合する。
+# 対象を run の arm に絞り、自動モードや手動の arm の意味は変えない。
+run_armed_for_label() {
+  local label="$1" f apid
+  [ -d "$ARM_DIR" ] || return 1
+  for f in "$ARM_DIR"/run-*; do
+    [ -e "$f" ] || continue
+    [ "$(sed -n '3p' "$f" 2>/dev/null)" = "$label" ] || continue
+    apid="$(sed -n '1p' "$f" 2>/dev/null)"
+    alive "$apid" && return 0
+  done
+  return 1
+}
+
 # ---------------------------------------------------------------- サブコマンド
 
 RUN_ARMID=""
@@ -528,12 +544,13 @@ cmd_status() {
 }
 
 cmd_acquire() {
-  local id="" pid="" label="hook"
+  local id="" pid="" label="hook" match_label=0
   while [ $# -gt 0 ]; do
     case "$1" in
-      --pid)   pid="${2:-}"; shift 2 ;;
-      --label) label="${2:-hook}"; shift 2 ;;
-      *)       [ -z "$id" ] && id="$1"; shift ;;
+      --pid)         pid="${2:-}"; shift 2 ;;
+      --label)       label="${2:-hook}"; shift 2 ;;
+      --match-label) match_label=1; shift ;;
+      *)             [ -z "$id" ] && id="$1"; shift ;;
     esac
   done
   [ -n "$id" ] || die "acquire には ID が必要です"
@@ -546,7 +563,7 @@ cmd_acquire() {
   fi
 
   lock
-  if ! armed_for "$pid"; then
+  if ! armed_for "$pid" && ! { [ "$match_label" = 1 ] && run_armed_for_label "$label"; }; then
     if [ -f "$AUTO_FLAG" ]; then
       # 自動モード: このセッションを自動で arm する。
       # arm は CLI 本体の PID に束縛するので、CLI が終われば掃除される。

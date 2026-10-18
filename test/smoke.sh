@@ -228,5 +228,47 @@ rm -f "$WORK/pmset_broken"
 "$WL" off >/dev/null 2>&1
 
 echo
+echo "15. run の arm はラベル一致の acquire だけを、子孫でないプロセスからも受け付ける"
+"$WL" auto off >/dev/null 2>&1
+"$WL" off >/dev/null 2>&1
+echo 0 >"$SLEEP_STATE"
+rm -f "$WORK/opencode_done"
+# basename が opencode になる偽コマンド。合図のファイルができるか、一定時間で終わる
+cat >"$WORK/opencode" <<'FAKE_EOF'
+#!/usr/bin/env bash
+i=0
+while [ ! -f "$(dirname "$0")/opencode_done" ] && [ "$i" -lt 300 ]; do
+  sleep 0.1
+  i=$((i + 1))
+done
+FAKE_EOF
+chmod +x "$WORK/opencode"
+"$WL" run "$WORK/opencode" >/dev/null 2>&1 &
+RUN_PID=$!
+i=0
+while ! ls "$WAKELOCK_STATE_DIR/arm"/run-* >/dev/null 2>&1 && [ "$i" -lt 100 ]; do
+  sleep 0.1
+  i=$((i + 1))
+done
+# テストのシェルはラッパーの親なので、--pid $$ の祖先にラッパーは含まれない
+"$WL" acquire opencode-s1 --pid $$ --label opencode >/dev/null 2>&1
+check_holds 0 "--match-label なしは無視される"
+check 0 "スリープ無効化されない (match-label なし)"
+"$WL" acquire opencode-s1 --pid $$ --label claude --match-label >/dev/null 2>&1
+check_holds 0 "ラベル不一致は無視される"
+check 0 "スリープ無効化されない (ラベル不一致)"
+"$WL" acquire opencode-s1 --pid $$ --label opencode --match-label >/dev/null 2>&1
+check_holds 1 "ラベル一致なら hold が作られる"
+wait_for 1 5
+check 1 "スリープ無効化される (ラベル一致)"
+touch "$WORK/opencode_done"
+wait "$RUN_PID" 2>/dev/null
+wait_for 0 15
+check 0 "ラッパー終了で run の arm が消え、スリープ可に戻る"
+"$WL" release opencode-s1 >/dev/null 2>&1
+"$WL" off >/dev/null 2>&1
+rm -f "$WORK/opencode_done"
+
+echo
 printf '結果: \033[32m%d PASS\033[0m / \033[31m%d FAIL\033[0m\n' "$PASS" "$FAIL"
 [ "$FAIL" -eq 0 ]
