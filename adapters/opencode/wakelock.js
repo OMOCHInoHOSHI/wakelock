@@ -86,11 +86,28 @@ const server = async () => {
 
 // ---------------------------------------------------------------- 2.0
 
+/** hold に関わるイベント。session.created は親子関係を覚えるためだけに別に扱う */
+const TRACKED = new Set([
+  "session.execution.started",
+  "session.step.started",
+  "permission.asked",
+  "permission.replied",
+  "session.execution.succeeded",
+  "session.execution.failed",
+  "session.execution.interrupted",
+  "session.deleted",
+])
+
 /**
  * 2.0 は作業をサーバーが持ち、プラグインもそこで動く。
  * 通常は常駐サービス (`opencode serve --service`、親は launchd) なので、
  * process.pid は TUI ではなくサービスになる。TUI を閉じても作業はサービスで続くため、
  * hold をサービスに紐付けるのは実態どおりでもある。
+ *
+ * サブエージェントは親とは別のセッションとして動き、承認待ちも子のセッションで起きる。
+ * セッションごとに hold を持つと、子が承認待ちで止まっていても、子の完了を待つ親の分で
+ * 起き続けてしまう。そのため hold は会話のツリー (ルートのセッション) ごとに 1 つ持ち、
+ * ツリーの中で実際に作業しているセッションがあるかで決める。
  */
 const setup = async (api) => {
   // 1.x も setup を呼ぶが event を渡さない。そちらは server 側が処理する
@@ -102,9 +119,15 @@ const setup = async (api) => {
    */
   const acquireWork = (sessionID) => acquire(sessionID, "--match-label")
 
-  /** sessionID -> { executing, pending: 応答待ちの承認 requestID } */
+  /**
+   * sessionID -> { executing, pending: 応答待ちの承認 requestID }。動きのあるセッションだけ持つ。
+   * 承認待ちを件数で持つのは、並列のツール呼び出しで承認が複数出たときに
+   * 最初の応答だけで起きてしまわないようにするため。
+   */
   const sessions = new Map()
-  /** acquire 済みの sessionID */
+  /** sessionID -> 親の sessionID (ルートなら null) */
+  const parents = new Map()
+  /** acquire 済みのルートの sessionID */
   const held = new Set()
 
   const state = (sessionID) => {
@@ -113,23 +136,69 @@ const setup = async (api) => {
     return s
   }
 
-  /**
-   * 実行中で、承認待ちを 1 件も抱えていないときだけ hold を持つ。
-   * 承認待ちを件数で持つのは、並列のツール呼び出しで承認が複数出たときに
-   * 最初の応答だけで起きてしまわないようにするため。
-   * refresh は状態が変わらなくても acquire し直す (CLI 側は同内容なら即返す)。
-   */
-  const sync = async (sessionID, { refresh = false } = {}) => {
-    const s = sessions.get(sessionID)
-    const want = !!s && s.executing && s.pending.size === 0
-    if (s && !s.executing && s.pending.size === 0) sessions.delete(sessionID)
+  const rootOf = (sessionID) => {
+    const seen = new Set()
+    let id = sessionID
+    while (parents.get(id) && !seen.has(id)) {
+      seen.add(id)
+      id = parents.get(id)
+    }
+    return id
+  }
 
-    if (want && (refresh || !held.has(sessionID))) {
-      held.add(sessionID)
-      await acquireWork(sessionID)
-    } else if (!want && held.has(sessionID)) {
-      held.delete(sessionID)
-      await release(sessionID)
+  /**
+   * 親子関係は session.created で覚える。それより前からあるセッション
+   * (再読み込みの後など) は問い合わせる。問い合わせに失敗したら、その時点では
+   * ルートとみなしてそのセッション単体で hold を持つ。失敗は一時的かもしれないので覚えず、
+   * 次のイベントで引き直す。
+   */
+  const resolveParents = async (sessionID) => {
+    let id = sessionID
+    while (id && !parents.has(id)) {
+      let info
+      try {
+        info = await api.session.get({ sessionID: id })
+      } catch {
+        return
+      }
+      const parentID = info?.parentID ?? null
+      parents.set(id, parentID)
+      id = parentID
+    }
+  }
+
+  /**
+   * 自分で作業しているセッション。実行中で、承認待ちがなく、実行中の子もいない。
+   * 子の完了を待っているだけの親は数えない。
+   */
+  const working = (sessionID, s) =>
+    s.executing &&
+    s.pending.size === 0 &&
+    ![...sessions].some(([id, child]) => child.executing && parents.get(id) === sessionID)
+
+  /**
+   * ツリーの中に作業しているセッションが 1 つでもあれば、そのルートの hold を持つ。
+   * 並列のサブエージェントの一部が承認待ちでも、他が作業していれば起き続ける。
+   *
+   * イベントのツリーだけでなく全体を計算し直す。親子関係が後から分かってルートが
+   * 変わったとき (問い合わせに失敗した後に session.created が届いた等) に、
+   * 古いルートの hold を取り残さないため。付け替えの間にスリープ設定が
+   * 揺れないよう、acquire を先に、release を後に行う。
+   * refresh は root を、状態が変わらなくても acquire し直す (CLI 側は同内容なら即返す)。
+   */
+  const sync = async (root, { refresh = false } = {}) => {
+    const wanted = new Set()
+    for (const [id, s] of sessions) if (working(id, s)) wanted.add(rootOf(id))
+
+    for (const r of wanted) {
+      if (held.has(r) && !(refresh && r === root)) continue
+      held.add(r)
+      await acquireWork(r)
+    }
+    for (const r of [...held]) {
+      if (wanted.has(r)) continue
+      held.delete(r)
+      await release(r)
     }
   }
 
@@ -137,11 +206,22 @@ const setup = async (api) => {
     const data = event?.data
     const sessionID = data?.sessionID
     if (!sessionID) return
+
+    /** 親子関係を覚えるだけで、hold は動かさない */
+    if (event.type === "session.created") {
+      parents.set(sessionID, data.parentID ?? null)
+      return
+    }
+    if (!TRACKED.has(event.type)) return
+
+    await resolveParents(sessionID)
+    const root = rootOf(sessionID)
+    const s = state(sessionID)
     switch (event.type) {
       /** 作業開始 */
       case "session.execution.started":
-        state(sessionID).executing = true
-        return sync(sessionID)
+        s.executing = true
+        break
 
       /**
        * ステップの開始は実行中の証拠になる。プラグインの再読み込みで
@@ -149,33 +229,34 @@ const setup = async (api) => {
        * 後から arm された場合や、前回の acquire が失敗していた場合にも効くよう取り直す。
        */
       case "session.step.started":
-        state(sessionID).executing = true
-        return sync(sessionID, { refresh: true })
+        s.executing = true
+        break
 
       /** 承認待ち */
       case "permission.asked":
-        state(sessionID).pending.add(data.id)
-        return sync(sessionID)
+        s.pending.add(data.id)
+        break
 
       /** 承認が返ってきた (拒否でも作業は続く) */
       case "permission.replied":
-        state(sessionID).pending.delete(data.requestID)
-        return sync(sessionID)
+        s.pending.delete(data.requestID)
+        break
 
-      /** 応答完了・失敗・中断・セッション消滅はいずれも解除 */
-      case "session.execution.succeeded":
-      case "session.execution.failed":
-      case "session.execution.interrupted":
-      case "session.deleted":
-        sessions.delete(sessionID)
-        return sync(sessionID)
+      /** 応答完了・失敗・中断・セッション消滅はいずれも作業の終わり */
+      default:
+        s.executing = false
+        s.pending.clear()
+        if (event.type === "session.deleted") parents.delete(sessionID)
     }
+    if (!s.executing && s.pending.size === 0) sessions.delete(sessionID)
+    return sync(root, { refresh: event.type === "session.step.started" })
   }
 
   const releaseAll = () => {
     const ids = [...held]
     held.clear()
     sessions.clear()
+    parents.clear()
     return Promise.all(ids.map(release))
   }
 

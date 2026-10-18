@@ -83,7 +83,8 @@ async function expectCalls(desc, want, { sorted = false } = {}) {
 }
 
 /** 2.0 の偽 API */
-function makeApi() {
+function makeApi(opts) {
+  let getCalls = 0
   const queue = []
   const waiters = []
   let done = false
@@ -116,19 +117,30 @@ function makeApi() {
       },
     },
   }
+  // opts があるときだけ session.get を偽装する (なければ api.session を持たない)
+  if (opts) {
+    api.session = {
+      async get({ sessionID }) {
+        getCalls += 1
+        if (getCalls <= (opts.failFirst ?? 0)) throw new Error("get failed")
+        if ((opts.failGet ?? []).includes(sessionID)) throw new Error("get failed")
+        return opts.sessions?.[sessionID] ?? {}
+      },
+    }
+  }
   const push = (event) => {
     if (waiters.length) waiters.shift()({ value: event, done: false })
     else queue.push(event)
   }
-  return { api, push, end: finish }
+  return { api, push, end: finish, getCalls: () => getCalls }
 }
 
 const ev = (type, data = {}) => ({ type, data })
 
 /** 2.0 のケースを新しい makeApi / setup で実行し、最後に後片付けしてログを空にする */
-async function case20(fn) {
+async function case20(fn, opts) {
   clearLog()
-  const m = makeApi()
+  const m = makeApi(opts)
   const dispose = await plugin.setup(m.api)
   try {
     await fn(m)
@@ -325,6 +337,216 @@ heading("2.0 で購読が abort なしに終わる")
   await dispose()
   clearLog()
 }
+
+// ------------------------------------------------------------------
+heading("サブエージェント: hold の単位はルート")
+await case20(async ({ push }) => {
+  push(ev("session.execution.started", { sessionID: "P" }))
+  await expectCalls("P の started で acquire", [acq2("P")])
+  clearLog()
+  push(ev("session.created", { sessionID: "C", parentID: "P" }))
+  await expectCalls("created では何も呼ばない", [])
+  push(ev("session.execution.started", { sessionID: "C" }))
+  await expectCalls("C の started でも何も呼ばない (ルートは取得済み)", [])
+  push(ev("session.step.started", { sessionID: "C" }))
+  await expectCalls("C の step.started でルートを取り直す", [acq2("P")])
+})
+
+// ------------------------------------------------------------------
+heading("サブエージェント: 子の承認待ちでルートごと解除")
+await case20(async ({ push }) => {
+  push(ev("session.created", { sessionID: "P" }))
+  push(ev("session.execution.started", { sessionID: "P" }))
+  await expectCalls("P の started で acquire", [acq2("P")])
+  clearLog()
+  push(ev("session.created", { sessionID: "C", parentID: "P" }))
+  push(ev("session.execution.started", { sessionID: "C" }))
+  await expectCalls("C の started では何も呼ばない", [])
+  push(ev("permission.asked", { sessionID: "C", id: "per1" }))
+  await expectCalls("C の asked でルートを release", [rel("P")])
+  clearLog()
+  push(ev("permission.replied", { sessionID: "C", requestID: "per1", reply: "once" }))
+  await expectCalls("C の replied でルートを acquire", [acq2("P")])
+  clearLog()
+  push(ev("session.execution.succeeded", { sessionID: "C" }))
+  await expectCalls("C の succeeded では何も呼ばない", [])
+  push(ev("session.execution.succeeded", { sessionID: "P" }))
+  await expectCalls("P の succeeded で release", [rel("P")])
+})
+
+// ------------------------------------------------------------------
+heading("サブエージェント: 並列の子")
+await case20(async ({ push }) => {
+  push(ev("session.execution.started", { sessionID: "P" }))
+  await expectCalls("P の started で acquire", [acq2("P")])
+  clearLog()
+  for (const c of ["C1", "C2"]) {
+    push(ev("session.created", { sessionID: c, parentID: "P" }))
+    push(ev("session.execution.started", { sessionID: c }))
+  }
+  await expectCalls("C1, C2 の created / started では何も呼ばない", [])
+  push(ev("permission.asked", { sessionID: "C1", id: "per1" }))
+  await expectCalls("C1 の asked では何も呼ばない (C2 が作業中)", [])
+  push(ev("session.execution.succeeded", { sessionID: "C2" }))
+  await expectCalls("C2 の succeeded で release (C1 は承認待ち)", [rel("P")])
+  clearLog()
+  push(ev("permission.replied", { sessionID: "C1", requestID: "per1", reply: "once" }))
+  await expectCalls("C1 の replied で acquire", [acq2("P")])
+  clearLog()
+  push(ev("session.execution.succeeded", { sessionID: "C1" }))
+  await expectCalls("C1 の succeeded では何も呼ばない", [])
+  push(ev("session.execution.succeeded", { sessionID: "P" }))
+  await expectCalls("P の succeeded で release", [rel("P")])
+})
+
+// ------------------------------------------------------------------
+heading("サブエージェント: 孫")
+await case20(async ({ push }) => {
+  push(ev("session.execution.started", { sessionID: "P" }))
+  await expectCalls("P の started で acquire", [acq2("P")])
+  clearLog()
+  push(ev("session.created", { sessionID: "C", parentID: "P" }))
+  push(ev("session.created", { sessionID: "G", parentID: "C" }))
+  push(ev("session.execution.started", { sessionID: "C" }))
+  push(ev("session.execution.started", { sessionID: "G" }))
+  await expectCalls("C, G の started では何も呼ばない", [])
+  push(ev("permission.asked", { sessionID: "G", id: "per1" }))
+  await expectCalls("G の asked でルートを release", [rel("P")])
+  clearLog()
+  push(ev("permission.replied", { sessionID: "G", requestID: "per1", reply: "once" }))
+  await expectCalls("G の replied でルートを acquire", [acq2("P")])
+})
+
+// ------------------------------------------------------------------
+heading("サブエージェント: created 未受信の子は session.get で親を引く")
+await case20(
+  async ({ push }) => {
+    push(ev("session.execution.started", { sessionID: "P" }))
+    await expectCalls("P の started で acquire", [acq2("P")])
+    clearLog()
+    push(ev("session.step.started", { sessionID: "C" }))
+    await expectCalls("C の step.started でルートを acquire", [acq2("P")])
+    clearLog()
+    push(ev("permission.asked", { sessionID: "C", id: "per1" }))
+    await expectCalls("C の asked でルートを release", [rel("P")])
+  },
+  { sessions: { C: { parentID: "P" } } },
+)
+
+// ------------------------------------------------------------------
+heading("サブエージェント: session.get が失敗した子はルート扱い")
+await case20(
+  async ({ push }) => {
+    push(ev("session.execution.started", { sessionID: "P" }))
+    await expectCalls("P の started で acquire", [acq2("P")])
+    clearLog()
+    push(ev("session.execution.started", { sessionID: "C" }))
+    await expectCalls("C の started は C 自身の hold になる", [acq2("C")])
+  },
+  { sessions: { C: { parentID: "P" } }, failGet: ["C"] },
+)
+
+// ------------------------------------------------------------------
+heading("サブエージェント: 承認待ちの子が削除されると親の作業に戻る")
+await case20(async ({ push }) => {
+  push(ev("session.execution.started", { sessionID: "P" }))
+  await expectCalls("P の started で acquire", [acq2("P")])
+  clearLog()
+  push(ev("session.created", { sessionID: "C", parentID: "P" }))
+  push(ev("session.execution.started", { sessionID: "C" }))
+  push(ev("permission.asked", { sessionID: "C", id: "per1" }))
+  await expectCalls("C の asked でルートを release", [rel("P")])
+  clearLog()
+  push(ev("session.deleted", { sessionID: "C" }))
+  await expectCalls("C の deleted でルートを acquire", [acq2("P")])
+})
+
+// ------------------------------------------------------------------
+heading("サブエージェント: 親子が分かっていれば session.get を呼ばない")
+await case20(
+  async ({ push, getCalls }) => {
+    push(ev("session.created", { sessionID: "P" }))
+    push(ev("session.created", { sessionID: "C", parentID: "P" }))
+    push(ev("session.execution.started", { sessionID: "P" }))
+    push(ev("session.execution.started", { sessionID: "C" }))
+    push(ev("permission.asked", { sessionID: "C", id: "per1" }))
+    await expectCalls("流れが処理される", [acq2("P"), rel("P")])
+    report(getCalls() === 0, "session.get の呼び出しが 0 回", "0", String(getCalls()))
+  },
+  {},
+)
+
+// ------------------------------------------------------------------
+heading("サブエージェント: 破棄でルートの hold を 1 回ずつ release")
+{
+  clearLog()
+  const m = makeApi()
+  const dispose = await plugin.setup(m.api)
+  m.push(ev("session.execution.started", { sessionID: "P" }))
+  m.push(ev("session.created", { sessionID: "C", parentID: "P" }))
+  m.push(ev("session.execution.started", { sessionID: "C" }))
+  await expectCalls("ルートの acquire だけ", [acq2("P")])
+  clearLog()
+  await dispose()
+  await expectCalls("ルートを 1 回だけ release", [rel("P")])
+  clearLog()
+}
+
+// ------------------------------------------------------------------
+heading("サブエージェント: 問い合わせ失敗の後に created で親が分かるとルートを付け替える")
+await case20(
+  async ({ push }) => {
+    push(ev("session.created", { sessionID: "P" }))
+    push(ev("session.execution.started", { sessionID: "P" }))
+    await expectCalls("P の started で acquire", [acq2("P")])
+    clearLog()
+    push(ev("session.execution.started", { sessionID: "C" }))
+    await expectCalls("C の started は C 自身の hold になる", [acq2("C")])
+    clearLog()
+    push(ev("session.created", { sessionID: "C", parentID: "P" }))
+    await expectCalls("created では何も呼ばない", [])
+    push(ev("session.step.started", { sessionID: "C" }))
+    await expectCalls("step.started で P を取り直し、C を release", [acq2("P"), rel("C")])
+    clearLog()
+    push(ev("permission.asked", { sessionID: "C", id: "per1" }))
+    await expectCalls("C の asked でルートを release", [rel("P")])
+    clearLog()
+    push(ev("session.execution.succeeded", { sessionID: "C" }))
+    await expectCalls("C の succeeded で P が作業に戻り acquire", [acq2("P")])
+  },
+  { failGet: ["C"] },
+)
+
+// ------------------------------------------------------------------
+heading("サブエージェント: 問い合わせの失敗は覚えず、次のイベントで引き直す")
+await case20(
+  async ({ push, getCalls }) => {
+    push(ev("session.created", { sessionID: "P" }))
+    push(ev("session.execution.started", { sessionID: "P" }))
+    await expectCalls("P の started で acquire", [acq2("P")])
+    clearLog()
+    push(ev("session.execution.started", { sessionID: "C" }))
+    await expectCalls("get 失敗中の C の started は C 自身の hold", [acq2("C")])
+    clearLog()
+    push(ev("session.step.started", { sessionID: "C" }))
+    await expectCalls("引き直しに成功し P を取り直して C を release", [acq2("P"), rel("C")])
+    report(getCalls() === 2, "session.get の呼び出しが 2 回", "2", String(getCalls()))
+  },
+  { failFirst: 1, sessions: { C: { parentID: "P" } } },
+)
+
+// ------------------------------------------------------------------
+heading("サブエージェント: parentID なしで成功したらルートとして覚え、再問い合わせしない")
+await case20(
+  async ({ push, getCalls }) => {
+    push(ev("session.execution.started", { sessionID: "C" }))
+    push(ev("session.step.started", { sessionID: "C" }))
+    push(ev("session.step.started", { sessionID: "C" }))
+    await expectCalls("C の hold が 3 回 acquire される", [acq2("C"), acq2("C"), acq2("C")])
+    report(getCalls() === 1, "session.get の呼び出しが 1 回", "1", String(getCalls()))
+  },
+  { sessions: { C: {} } },
+)
 
 // ------------------------------------------------------------------
 heading("release の再試行")
